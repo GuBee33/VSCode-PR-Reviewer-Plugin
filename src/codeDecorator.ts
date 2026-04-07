@@ -16,7 +16,6 @@ export class CodeDecorator implements vscode.Disposable {
             backgroundColor: 'rgba(255, 0, 0, 0.15)',
             border: '1px solid rgba(255, 80, 80, 0.6)',
             borderRadius: '2px',
-            gutterIconPath: new vscode.ThemeIcon('error').id as unknown as vscode.Uri,
             overviewRulerColor: 'rgba(255, 80, 80, 0.8)',
             overviewRulerLane: vscode.OverviewRulerLane.Right,
             after: {

@@ -28,21 +28,18 @@ export class CopilotReviewer {
         const systemPrompt = this.buildSystemPrompt();
         const userPrompt = this.buildUserPrompt(truncatedDiff);
 
-        // Select the language model
-        const [model] = await vscode.lm.selectChatModels({ family: this.modelId });
-        if (!model) {
-            // Fallback: try any available copilot model
-            const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-            if (!models || models.length === 0) {
+        // Select the language model – prefer the configured model, fall back to any copilot model
+        let selectedModel = (await vscode.lm.selectChatModels({ family: this.modelId }))[0];
+        if (!selectedModel) {
+            const fallbackModels = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+            if (!fallbackModels || fallbackModels.length === 0) {
                 throw new Error(
                     'No Copilot language model is available. ' +
                     'Make sure GitHub Copilot is installed and you are signed in.'
                 );
             }
+            selectedModel = fallbackModels[0];
         }
-
-        const selectedModel = (await vscode.lm.selectChatModels({ family: this.modelId }))[0]
-            ?? (await vscode.lm.selectChatModels({ vendor: 'copilot' }))[0];
 
         const messages = [
             vscode.LanguageModelChatMessage.User(systemPrompt),

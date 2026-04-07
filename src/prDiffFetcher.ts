@@ -26,6 +26,8 @@ export class PrDiffFetcher {
         return diff;
     }
 
+    private static readonly DIFF_EXCLUDES = '":(exclude)package-lock.json" ":(exclude)*.lock"';
+
     private buildDiffCommand(cwd: string): string {
         // Attempt to find the merge-base; if that fails, just diff the current branch vs base.
         try {
@@ -35,13 +37,13 @@ export class PrDiffFetcher {
             ).toString().trim();
 
             if (mergeBase) {
-                return `git diff ${mergeBase} HEAD -- . ":(exclude)package-lock.json" ":(exclude)*.lock"`;
+                return `git diff ${mergeBase} HEAD -- . ${PrDiffFetcher.DIFF_EXCLUDES}`;
             }
         } catch {
             // merge-base failed – fall through to simple diff
         }
 
-        return `git diff ${this.baseBranch}...HEAD -- . ":(exclude)package-lock.json" ":(exclude)*.lock"`;
+        return `git diff ${this.baseBranch}...HEAD -- . ${PrDiffFetcher.DIFF_EXCLUDES}`;
     }
 
     private runGit(cwd: string, cmd: string): string {
@@ -53,7 +55,7 @@ export class PrDiffFetcher {
             }).toString();
         } catch (err) {
             // If the base branch doesn't exist locally, try a simple HEAD diff
-            const fallbackCmd = 'git diff HEAD~1 HEAD -- . ":(exclude)package-lock.json" ":(exclude)*.lock"';
+            const fallbackCmd = `git diff HEAD~1 HEAD -- . ${PrDiffFetcher.DIFF_EXCLUDES}`;
             try {
                 return execSync(fallbackCmd, {
                     cwd,
