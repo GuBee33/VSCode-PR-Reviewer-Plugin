@@ -1,0 +1,93 @@
+{
+  "name": "pr-reviewer",
+  "displayName": "PR Reviewer – Copilot Edition",
+  "description": "Review pull requests with GitHub Copilot, narrated by an animated cartoon character in the style of Ricky Gervais.",
+  "version": "0.1.0",
+  "publisher": "GuBee33",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "copilot",
+    "pull request",
+    "code review",
+    "ai"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "prReviewer.reviewPR",
+        "title": "PR Reviewer: Review Current PR / Branch Diff",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "prReviewer.clearDecorations",
+        "title": "PR Reviewer: Clear All Review Decorations"
+      }
+    ],
+    "configuration": {
+      "title": "PR Reviewer",
+      "properties": {
+        "prReviewer.reviewerStyle": {
+          "type": "string",
+          "default": "Ricky Gervais",
+          "description": "The persona / reviewer style used when prompting Copilot. Default is 'Ricky Gervais'. You can set this to any style you like, e.g. 'Gordon Ramsay', 'a disappointed professor', etc."
+        },
+        "prReviewer.extraInstructions": {
+          "type": "string",
+          "default": "",
+          "description": "Additional instructions appended to the review prompt, e.g. 'Focus on security issues only'."
+        },
+        "prReviewer.baseBranch": {
+          "type": "string",
+          "default": "main",
+          "description": "The base branch to diff against when no upstream PR is detected (e.g. 'main' or 'develop')."
+        },
+        "prReviewer.spritesheetPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to a custom PNG sprite sheet for the reviewer character. Leave empty to use the built-in placeholder."
+        },
+        "prReviewer.spriteFrameWidth": {
+          "type": "number",
+          "default": 64,
+          "description": "Width (px) of a single frame in the sprite sheet."
+        },
+        "prReviewer.spriteFrameHeight": {
+          "type": "number",
+          "default": 64,
+          "description": "Height (px) of a single frame in the sprite sheet."
+        },
+        "prReviewer.spriteFrameCount": {
+          "type": "number",
+          "default": 8,
+          "description": "Total number of animation frames in the sprite sheet (laid out horizontally)."
+        },
+        "prReviewer.model": {
+          "type": "string",
+          "default": "copilot-gpt-4o",
+          "description": "The Copilot language model to use. Must be a model ID accessible through the VS Code Language Model API (e.g. 'copilot-gpt-4o', 'copilot-gpt-4')."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.0"
+  }
+}
