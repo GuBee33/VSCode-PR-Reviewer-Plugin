@@ -51,22 +51,27 @@
         "prReviewer.spritesheetPath": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to a custom PNG sprite sheet for the reviewer character. Leave empty to use the built-in placeholder."
+          "description": "Absolute path to a custom PNG sprite sheet. Leave empty to use the bundled GuBee_SpriteSheet.png."
         },
         "prReviewer.spriteFrameWidth": {
           "type": "number",
-          "default": 64,
-          "description": "Width (px) of a single frame in the sprite sheet."
+          "default": 128,
+          "description": "Display width (px) of a single frame. Defaults to 128 (tuned for the bundled GuBee sprite sheet)."
         },
         "prReviewer.spriteFrameHeight": {
           "type": "number",
-          "default": 64,
-          "description": "Height (px) of a single frame in the sprite sheet."
+          "default": 192,
+          "description": "Display height (px) of a single frame. Defaults to 192 (tuned for the bundled GuBee sprite sheet)."
         },
         "prReviewer.spriteFrameCount": {
           "type": "number",
-          "default": 8,
-          "description": "Total number of animation frames in the sprite sheet (laid out horizontally)."
+          "default": 4,
+          "description": "Number of animation frames per row in the sprite sheet. Defaults to 4."
+        },
+        "prReviewer.spriteRowCount": {
+          "type": "number",
+          "default": 4,
+          "description": "Number of animation rows in the sprite sheet (one per character state: idle, thinking, talking, laughing). Defaults to 4."
         },
         "prReviewer.model": {
           "type": "string",
