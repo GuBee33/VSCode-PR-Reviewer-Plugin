@@ -1,3 +1,9 @@
-node_modules
-out
+.vscode/**
+.vscode-test/**
+src/**
+node_modules/**
+.gitignore
+tsconfig.json
+**/*.map
 *.vsix
+install.ps1

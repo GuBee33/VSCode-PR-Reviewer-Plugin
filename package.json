@@ -23,13 +23,50 @@
       {
         "command": "prReviewer.reviewPR",
         "title": "PR Reviewer: Review Current PR / Branch Diff",
-        "icon": "$(comment-discussion)"
+        "icon": "$(play)"
       },
       {
         "command": "prReviewer.clearDecorations",
         "title": "PR Reviewer: Clear All Review Decorations"
+      },
+      {
+        "command": "prReviewer.openSettings",
+        "title": "PR Reviewer: Settings",
+        "icon": "$(gear)"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "prReviewerSidebar",
+          "title": "PR Reviewer",
+          "icon": "media/icon-sidebar.svg"
+        }
+      ]
+    },
+    "views": {
+      "prReviewerSidebar": [
+        {
+          "type": "webview",
+          "id": "prReviewer.characterView",
+          "name": "Reviewer"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "prReviewer.reviewPR",
+          "when": "view == prReviewer.characterView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "prReviewer.openSettings",
+          "when": "view == prReviewer.characterView",
+          "group": "navigation@2"
+        }
+      ]
+    },
     "configuration": {
       "title": "PR Reviewer",
       "properties": {
