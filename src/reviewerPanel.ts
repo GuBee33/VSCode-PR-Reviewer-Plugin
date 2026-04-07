@@ -66,6 +66,16 @@ export class ReviewerPanel implements vscode.Disposable {
         void this.panel.webview.postMessage(msg);
     }
 
+    /** Append a timestamped entry to the progress log in the panel. */
+    appendLog(text: string, isError = false): void {
+        this.postMessage({ type: 'log', text, isError });
+    }
+
+    /** Clear all entries from the progress log. */
+    clearLog(): void {
+        this.postMessage({ type: 'clearLog' });
+    }
+
     private getSpriteUri(): vscode.Uri {
         const config = vscode.workspace.getConfiguration('prReviewer');
         const custom = config.get<string>('spritesheetPath', '');
@@ -74,20 +84,32 @@ export class ReviewerPanel implements vscode.Disposable {
             return this.panel.webview.asWebviewUri(vscode.Uri.file(custom));
         }
 
-        // Use bundled placeholder
+        // Use bundled GuBee sprite sheet
         const builtIn = vscode.Uri.file(
-            path.join(this.extensionUri.fsPath, 'media', 'sprite.png')
+            path.join(this.extensionUri.fsPath, 'media', 'GuBee_SpriteSheet.png')
         );
         return this.panel.webview.asWebviewUri(builtIn);
     }
 
     private buildHtml(): string {
         const config = vscode.workspace.getConfiguration('prReviewer');
-        const frameW = config.get<number>('spriteFrameWidth', 64);
-        const frameH = config.get<number>('spriteFrameHeight', 64);
-        const frameCount = config.get<number>('spriteFrameCount', 8);
+        const frameW    = config.get<number>('spriteFrameWidth',  128);
+        const frameH    = config.get<number>('spriteFrameHeight', 192);
+        const frameCount = config.get<number>('spriteFrameCount', 4);
+        const rowCount  = config.get<number>('spriteRowCount',    4);
         const spriteUri = this.getSpriteUri();
-        const nonce = getNonce();
+        const nonce     = getNonce();
+
+        // Full sprite-sheet display dimensions
+        const sheetW = frameW * frameCount;
+        const sheetH = frameH * rowCount;
+
+        // Y offsets (px) for each animation row, clamped to available rows
+        const rowToYOffset = (r: number) => -Math.min(r, rowCount - 1) * frameH;
+        const yIdle     = 0;
+        const yThinking = rowToYOffset(1);
+        const yTalking  = rowToYOffset(2);
+        const yLaughing = rowToYOffset(3);
 
         return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -101,13 +123,6 @@ export class ReviewerPanel implements vscode.Disposable {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PR Reviewer</title>
 <style>
-  :root {
-    --frame-w: ${frameW}px;
-    --frame-h: ${frameH}px;
-    --frame-count: ${frameCount};
-    --sprite-total-w: ${frameW * frameCount}px;
-  }
-
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
   body {
@@ -133,32 +148,47 @@ export class ReviewerPanel implements vscode.Disposable {
   }
 
   #sprite-wrap {
-    width: var(--frame-w);
-    height: var(--frame-h);
+    width: ${frameW}px;
+    height: ${frameH}px;
     overflow: hidden;
     flex-shrink: 0;
-    image-rendering: pixelated;
   }
 
+  /* The sprite element is the same size as one frame.
+     background-size stretches the full sheet; background-position
+     selects the current frame. */
   #sprite {
-    width: var(--sprite-total-w);
-    height: var(--frame-h);
+    width: ${frameW}px;
+    height: ${frameH}px;
     background-image: url('${spriteUri}');
-    background-size: cover;
+    background-size: ${sheetW}px ${sheetH}px;
     background-repeat: no-repeat;
+    background-position: 0px 0px;
     animation: none;
   }
 
-  /* Animation keyframes for walking through frames */
-  @keyframes sprite-idle    { to { background-position-x: calc(-1 * var(--sprite-total-w)); } }
-  @keyframes sprite-thinking{ to { background-position-x: calc(-1 * var(--sprite-total-w)); } }
-  @keyframes sprite-talking { to { background-position-x: calc(-1 * var(--sprite-total-w)); } }
-  @keyframes sprite-laughing{ to { background-position-x: calc(-1 * var(--sprite-total-w)); } }
+  /* Per-state keyframes: X sweeps through all columns, Y pins the row. */
+  @keyframes sprite-idle {
+    from { background-position: 0px ${yIdle}px; }
+    to   { background-position: -${sheetW}px ${yIdle}px; }
+  }
+  @keyframes sprite-thinking {
+    from { background-position: 0px ${yThinking}px; }
+    to   { background-position: -${sheetW}px ${yThinking}px; }
+  }
+  @keyframes sprite-talking {
+    from { background-position: 0px ${yTalking}px; }
+    to   { background-position: -${sheetW}px ${yTalking}px; }
+  }
+  @keyframes sprite-laughing {
+    from { background-position: 0px ${yLaughing}px; }
+    to   { background-position: -${sheetW}px ${yLaughing}px; }
+  }
 
-  #sprite.idle     { animation: sprite-idle     1.2s steps(var(--frame-count)) infinite; }
-  #sprite.thinking { animation: sprite-thinking 0.8s steps(var(--frame-count)) infinite; }
-  #sprite.talking  { animation: sprite-talking  0.5s steps(var(--frame-count)) infinite; }
-  #sprite.laughing { animation: sprite-laughing 0.3s steps(var(--frame-count)) infinite; }
+  #sprite.idle     { animation: sprite-idle     1.2s steps(${frameCount}) infinite; }
+  #sprite.thinking { animation: sprite-thinking 0.8s steps(${frameCount}) infinite; }
+  #sprite.talking  { animation: sprite-talking  0.5s steps(${frameCount}) infinite; }
+  #sprite.laughing { animation: sprite-laughing 0.3s steps(${frameCount}) infinite; }
 
   /* Speech bubble */
   #bubble {
@@ -187,6 +217,46 @@ export class ReviewerPanel implements vscode.Disposable {
     bottom: 15px;
     border: 4px solid transparent;
     border-right-color: var(--vscode-input-background);
+  }
+
+  /* ── Progress Log ── */
+  #log-section {
+    border-bottom: 1px solid var(--vscode-panel-border);
+    background: var(--vscode-sideBar-background);
+    flex-shrink: 0;
+    max-height: 110px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  #log-header {
+    font-size: 0.72em;
+    font-weight: bold;
+    padding: 4px 12px 2px;
+    color: var(--vscode-descriptionForeground);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    flex-shrink: 0;
+  }
+
+  #log {
+    overflow-y: auto;
+    padding: 0 12px 6px;
+    flex: 1;
+  }
+
+  .log-line {
+    font-size: 0.78em;
+    font-family: var(--vscode-editor-font-family, monospace);
+    color: var(--vscode-descriptionForeground);
+    padding: 1px 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .log-line.error {
+    color: var(--vscode-editorError-foreground, #f44336);
   }
 
   /* ── Findings List ── */
@@ -284,6 +354,10 @@ export class ReviewerPanel implements vscode.Disposable {
 </div>
 
 <!-- Findings -->
+<div id="log-section">
+  <div id="log-header">Progress Log</div>
+  <div id="log"></div>
+</div>
 <div id="findings-container">
   <div class="empty-state">Hit <strong>PR Reviewer: Review Current PR / Branch Diff</strong> to get started.</div>
 </div>
@@ -294,6 +368,7 @@ export class ReviewerPanel implements vscode.Disposable {
   const sprite = document.getElementById('sprite');
   const bubble = document.getElementById('bubble');
   const container = document.getElementById('findings-container');
+  const logEl = document.getElementById('log');
 
   let talkTimer = null;
 
@@ -307,6 +382,26 @@ export class ReviewerPanel implements vscode.Disposable {
     bubble.textContent = text;
     // Return to idle after 6 seconds of no new message
     talkTimer = setTimeout(() => setState('idle'), 6000);
+  }
+
+  function appendLog(text, isError) {
+    const line = document.createElement('div');
+    line.className = isError ? 'log-line error' : 'log-line';
+    const now = new Date();
+    const ts = String(now.getHours()).padStart(2, '0') + ':' +
+               String(now.getMinutes()).padStart(2, '0') + ':' +
+               String(now.getSeconds()).padStart(2, '0');
+    line.textContent = '[' + ts + '] ' + text;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+    // Keep at most 100 lines
+    while (logEl.children.length > 100) {
+      logEl.removeChild(logEl.firstChild);
+    }
+  }
+
+  function clearLog() {
+    logEl.innerHTML = '';
   }
 
   function renderFindings(findings) {
@@ -387,6 +482,12 @@ export class ReviewerPanel implements vscode.Disposable {
         break;
       case 'findings':
         renderFindings(msg.findings);
+        break;
+      case 'log':
+        appendLog(msg.text, msg.isError);
+        break;
+      case 'clearLog':
+        clearLog();
         break;
     }
   });
