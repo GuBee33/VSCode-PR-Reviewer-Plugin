@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ReviewFinding } from './types';
-import { outputChannel } from './extension';
+import { debugLog, showDebugOutput } from './extension';
 
 const MAX_DIFF_CHARS = 30_000;
 
@@ -13,10 +13,9 @@ export class CopilotReviewer {
     private readonly extraInstructions: string;
     private readonly modelId: string;
 
-    constructor(modelOverride?: string, reviewerStyleOverride?: string) {
-        const config = vscode.workspace.getConfiguration('prReviewer');
+    constructor(modelOverride?: string, reviewerStyleOverride?: string, extraInstructionsOverride?: string) {
         this.reviewerStyle = reviewerStyleOverride || 'Ricky Gervais';
-        this.extraInstructions = config.get<string>('extraInstructions', '');
+        this.extraInstructions = extraInstructionsOverride || '';
         this.modelId = modelOverride || 'copilot-gpt-4o';
     }
 
@@ -30,12 +29,12 @@ export class CopilotReviewer {
         const userPrompt = this.buildUserPrompt(truncatedDiff);
 
         // Select the language model – prefer the configured model, fall back to any copilot model
-        outputChannel.appendLine(`[Model Selection] Requested model family: ${this.modelId}`);
+        debugLog(`[Model Selection] Requested model family: ${this.modelId}`);
         let selectedModel = (await vscode.lm.selectChatModels({ family: this.modelId }))[0];
         if (!selectedModel) {
-            outputChannel.appendLine('[Model Selection] Primary model not found, trying fallback...');
+            debugLog('[Model Selection] Primary model not found, trying fallback...');
             const fallbackModels = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-            outputChannel.appendLine(`[Model Selection] Available fallback models: ${fallbackModels.map(m => m.family).join(', ')}`);
+            debugLog(`[Model Selection] Available fallback models: ${fallbackModels.map(m => m.family).join(', ')}`);
             if (!fallbackModels || fallbackModels.length === 0) {
                 throw new Error(
                     'No Copilot language model is available. ' +
@@ -44,7 +43,7 @@ export class CopilotReviewer {
             }
             selectedModel = fallbackModels[0];
         }
-        outputChannel.appendLine(`[Model Selection] Using model: ${selectedModel.family} (${selectedModel.name})`);
+        debugLog(`[Model Selection] Using model: ${selectedModel.family} (${selectedModel.name})`);
 
         const messages = [
             vscode.LanguageModelChatMessage.User(systemPrompt),
@@ -63,10 +62,10 @@ export class CopilotReviewer {
         }
 
         // Log raw response for debugging
-        outputChannel.appendLine(`[Response] Raw length: ${raw.length} chars`);
-        outputChannel.appendLine(`[Response] Content:\n${raw}`);
-        outputChannel.appendLine('---');
-        outputChannel.show(true); // Show the output channel
+        debugLog(`[Response] Raw length: ${raw.length} chars`);
+        debugLog(`[Response] Content:\n${raw}`);
+        debugLog('---');
+        showDebugOutput(); // Show the output channel if debug enabled
 
         return this.parseFindings(raw);
     }
@@ -102,33 +101,33 @@ Do not wrap the JSON in markdown code fences or add any other text outside the J
         let cleaned = raw.trim();
         cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
 
-        outputChannel.appendLine(`[Parsing] Cleaned length: ${cleaned.length}`);
+        debugLog(`[Parsing] Cleaned length: ${cleaned.length}`);
 
         let parsed: unknown;
         try {
             parsed = JSON.parse(cleaned);
-            outputChannel.appendLine(`[Parsing] JSON parsed OK, isArray: ${Array.isArray(parsed)}, length: ${Array.isArray(parsed) ? parsed.length : 'N/A'}`);
+            debugLog(`[Parsing] JSON parsed OK, isArray: ${Array.isArray(parsed)}, length: ${Array.isArray(parsed) ? parsed.length : 'N/A'}`);
         } catch (e) {
-            outputChannel.appendLine(`[Parsing] JSON parse failed: ${e}`);
+            debugLog(`[Parsing] JSON parse failed: ${e}`);
             // Try to extract a JSON array from the middle of the response
             const match = cleaned.match(/\[[\s\S]*\]/);
             if (match) {
-                outputChannel.appendLine('[Parsing] Found array pattern, re-parsing...');
+                debugLog('[Parsing] Found array pattern, re-parsing...');
                 try {
                     parsed = JSON.parse(match[0]);
-                    outputChannel.appendLine(`[Parsing] Re-parse OK, length: ${Array.isArray(parsed) ? parsed.length : 'not array'}`);
+                    debugLog(`[Parsing] Re-parse OK, length: ${Array.isArray(parsed) ? parsed.length : 'not array'}`);
                 } catch (e2) {
-                    outputChannel.appendLine(`[Parsing] Re-parse failed: ${e2}`);
+                    debugLog(`[Parsing] Re-parse failed: ${e2}`);
                     return this.fallbackParse(raw);
                 }
             } else {
-                outputChannel.appendLine('[Parsing] No array pattern, using fallback');
+                debugLog('[Parsing] No array pattern, using fallback');
                 return this.fallbackParse(raw);
             }
         }
 
         if (!Array.isArray(parsed)) {
-            outputChannel.appendLine('[Parsing] Result not an array, returning empty');
+            debugLog('[Parsing] Result not an array, returning empty');
             return [];
         }
 
@@ -136,7 +135,7 @@ Do not wrap the JSON in markdown code fences or add any other text outside the J
             .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
             .map(item => this.toFinding(item));
         
-        outputChannel.appendLine(`[Parsing] Final findings: ${findings.length}`);
+        debugLog(`[Parsing] Final findings: ${findings.length}`);
         return findings;
     }
 

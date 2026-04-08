@@ -8,6 +8,22 @@ import { CodeDecorator } from './codeDecorator';
 let decorator: CodeDecorator | undefined;
 export let outputChannel: vscode.OutputChannel;
 
+/** Log to output channel only if debug is enabled */
+export function debugLog(message: string): void {
+    const config = vscode.workspace.getConfiguration('prReviewer');
+    if (config.get<boolean>('debugOutput', false)) {
+        outputChannel.appendLine(message);
+    }
+}
+
+/** Show output channel only if debug is enabled */
+export function showDebugOutput(): void {
+    const config = vscode.workspace.getConfiguration('prReviewer');
+    if (config.get<boolean>('debugOutput', false)) {
+        outputChannel.show(true);
+    }
+}
+
 export function activate(context: vscode.ExtensionContext): void {
     outputChannel = vscode.window.createOutputChannel('PR Reviewer');
     context.subscriptions.push(outputChannel);
@@ -29,9 +45,9 @@ export function activate(context: vscode.ExtensionContext): void {
     // The webview posts { type: 'startReview' } which triggers the command
     // This is handled inside SidebarViewProvider via onDidReceiveMessage
 
-    const reviewCmd = vscode.commands.registerCommand('prReviewer.reviewPR', async (model?: string, reviewerStyle?: string, baseBranch?: string) => {
+    const reviewCmd = vscode.commands.registerCommand('prReviewer.reviewPR', async (model?: string, reviewerStyle?: string, baseBranch?: string, extraInstructions?: string) => {
         sidebarProvider.reveal();
-        await runReview(context, decorator!, sidebarProvider, statusBar, model, reviewerStyle, baseBranch);
+        await runReview(context, decorator!, sidebarProvider, statusBar, model, reviewerStyle, baseBranch, extraInstructions);
     });
 
     const clearCmd = vscode.commands.registerCommand('prReviewer.clearDecorations', () => {
@@ -39,11 +55,16 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage('PR Reviewer: All decorations cleared.');
     });
 
+    const resetCmd = vscode.commands.registerCommand('prReviewer.resetPanel', () => {
+        decorator?.clearAll();
+        sidebarProvider.resetPanel();
+    });
+
     const settingsCmd = vscode.commands.registerCommand('prReviewer.openSettings', () => {
         void vscode.commands.executeCommand('workbench.action.openSettings', 'prReviewer');
     });
 
-    context.subscriptions.push(sidebarReg, statusBar, reviewCmd, clearCmd, settingsCmd, decorator);
+    context.subscriptions.push(sidebarReg, statusBar, reviewCmd, clearCmd, resetCmd, settingsCmd, decorator);
 }
 
 export function deactivate(): void {
@@ -57,7 +78,8 @@ async function runReview(
     statusBar: StatusBarCharacter,
     modelOverride?: string,
     reviewerStyleOverride?: string,
-    baseBranchOverride?: string
+    baseBranchOverride?: string,
+    extraInstructionsOverride?: string
 ): Promise<void> {
     try {
         sidebar.setReviewingState(true);
@@ -91,7 +113,7 @@ async function runReview(
         sidebar.showMessage('🤔 Reading this… utter disaster…', 'thinking');
         sidebar.appendLog('🤖 Sending diff to Copilot for review…');
         statusBar.setState('thinking', `Reviewing ${diffLines} lines…`);
-        const reviewer = new CopilotReviewer(modelOverride, reviewerStyleOverride);
+        const reviewer = new CopilotReviewer(modelOverride, reviewerStyleOverride, extraInstructionsOverride);
         const findings = await reviewer.review(diff);
 
         if (!findings || findings.length === 0) {

@@ -44,7 +44,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             if (msg.type === 'navigate') {
                 this.navigateToFile(msg.file, msg.line);
             } else if (msg.type === 'startReview') {
-                void vscode.commands.executeCommand('prReviewer.reviewPR', msg.model, msg.reviewerStyle, msg.baseBranch);
+                void vscode.commands.executeCommand('prReviewer.reviewPR', msg.model, msg.reviewerStyle, msg.baseBranch, msg.extraInstructions);
             } else if (msg.type === 'requestModels') {
                 this.sendAvailableModels();
             } else if (msg.type === 'requestBranches') {
@@ -78,6 +78,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     /** Hide or show the Start Review button based on review state. */
     setReviewingState(isReviewing: boolean): void {
         this.postMessage({ type: 'reviewingState', isReviewing });
+    }
+
+    /** Reset the panel to initial state. */
+    resetPanel(): void {
+        this.postMessage({ type: 'reset' });
     }
 
     /** Send available language models to the webview. */
@@ -166,20 +171,36 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         return webview.asWebviewUri(builtIn);
     }
 
+    private getCustomSpriteUri(webview: vscode.Webview, absolutePath: string): vscode.Uri | null {
+        if (!absolutePath) {
+            return null;
+        }
+        try {
+            const fileUri = vscode.Uri.file(absolutePath);
+            return webview.asWebviewUri(fileUri);
+        } catch {
+            return null;
+        }
+    }
+
     private buildHtml(webview: vscode.Webview): string {
-        const cols = 5;
-        const rows = 5;
-        const totalFrames = cols * rows;   // 25
-        const frameW = 256;               // 1280 / 5
-        const frameH = 256;               // 1280 / 5
-        const idleUri = this.getSpriteUri(webview, 'GuBee-idle.png');
-        const walkUri = this.getSpriteUri(webview, 'GuBee-walk.png');
+        // Check for custom sprites and their configurations
+        const config = vscode.workspace.getConfiguration('prReviewer');
+        const customIdle = config.get<string>('customIdleSprite', '');
+        const customWork = config.get<string>('customWorkSprite', '');
+        const idleRows = config.get<number>('idleSpriteRows', 5);
+        const idleCols = config.get<number>('idleSpriteCols', 5);
+        const workRows = config.get<number>('workSpriteRows', 5);
+        const workCols = config.get<number>('workSpriteCols', 5);
+        
+        const idleUri = this.getCustomSpriteUri(webview, customIdle) 
+            || this.getSpriteUri(webview, 'GuBee-idle.png');
+        const workUri = this.getCustomSpriteUri(webview, customWork) 
+            || this.getSpriteUri(webview, 'GuBee-walk.png');
         const nonce   = getNonce();
 
-        // Scale down for narrow sidebar
-        const scale   = 0.5;
-        const dispW   = Math.round(frameW * scale);
-        const dispH   = Math.round(frameH * scale);
+        // Display size for the sprite viewport (will be scaled based on actual sprite)
+        const dispSize = 128;
 
         return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -187,7 +208,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none';
-               img-src ${webview.cspSource} https: data:;
+               img-src ${webview.cspSource} https: data: file:;
                style-src 'unsafe-inline';
                script-src 'nonce-${nonce}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -217,17 +238,17 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   }
 
   #sprite-wrap {
-    width: ${dispW}px;
-    height: ${dispH}px;
+    width: ${dispSize}px;
+    height: ${dispSize}px;
     overflow: hidden;
     flex-shrink: 0;
   }
 
   #sprite {
-    width: ${dispW}px;
-    height: ${dispH}px;
+    width: ${dispSize}px;
+    height: ${dispSize}px;
     background-image: url('${idleUri}');
-    background-size: ${dispW * cols}px ${dispH * rows}px;
+    background-size: ${dispSize * idleCols}px ${dispSize * idleRows}px;
     background-repeat: no-repeat;
     background-position: 0px 0px;
   }
@@ -342,6 +363,13 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     font-size: 0.85em;
   }
   .reviewer-input:focus { outline: 1px solid var(--vscode-focusBorder); }
+  .extra-instructions {
+    width: 100%; padding: 6px 8px;
+    background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, #555); border-radius: 4px;
+    font-size: 0.85em; font-family: inherit; resize: vertical;
+  }
+  .extra-instructions:focus { outline: 1px solid var(--vscode-focusBorder); }
 </style>
 </head>
 <body>
@@ -381,6 +409,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       <label for="reviewer-input">Reviewer Style</label>
       <input type="text" id="reviewer-input" class="reviewer-input" value="Ricky Gervais" placeholder="e.g. Gordon Ramsay, a disappointed professor...">
     </div>
+    <div class="input-row">
+      <label for="extra-instructions">Extra Instructions</label>
+      <textarea id="extra-instructions" class="extra-instructions" rows="2" placeholder="e.g. Focus on security issues only..."></textarea>
+    </div>
     <button class="review-btn" id="start-btn">Start Review</button>
   </div>
 </div>
@@ -398,37 +430,37 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   const modelSelect = document.getElementById('model-select');
   const reviewerInput = document.getElementById('reviewer-input');
   const branchSelect = document.getElementById('branch-select');
+  const extraInstructionsInput = document.getElementById('extra-instructions');
 
   // Sprite animation config
-  const IDLE_URL = '${idleUri}';
-  const WALK_URL = '${walkUri}';
-  const COLS = ${cols};
-  const ROWS = ${rows};
-  const TOTAL = ${totalFrames};
-  const FRAME_W = ${dispW};
-  const FRAME_H = ${dispH};
+  const DISP_SIZE = ${dispSize};
+  const IDLE_CONFIG = { url: '${idleUri}', cols: ${idleCols}, rows: ${idleRows} };
+  const WORK_CONFIG = { url: '${workUri}', cols: ${workCols}, rows: ${workRows} };
 
   let currentFrame = 0;
   let animTimer = null;
-  let currentSheet = IDLE_URL;
+  let currentConfig = IDLE_CONFIG;
+  let isReviewing = false;
 
-  function startAnimation(sheetUrl, fps) {
-    if (currentSheet !== sheetUrl) {
-      currentSheet = sheetUrl;
-      sprite.style.backgroundImage = "url('" + sheetUrl + "')";
+  function startAnimation(config, fps) {
+    var total = config.cols * config.rows;
+    if (currentConfig.url !== config.url) {
+      currentConfig = config;
+      sprite.style.backgroundImage = "url('" + config.url + "')";
+      sprite.style.backgroundSize = (DISP_SIZE * config.cols) + 'px ' + (DISP_SIZE * config.rows) + 'px';
     }
     if (animTimer) clearInterval(animTimer);
     currentFrame = 0;
     animTimer = setInterval(function() {
-      var col = currentFrame % COLS;
-      var row = Math.floor(currentFrame / COLS);
-      sprite.style.backgroundPosition = (-col * FRAME_W) + 'px ' + (-row * FRAME_H) + 'px';
-      currentFrame = (currentFrame + 1) % TOTAL;
+      var col = currentFrame % config.cols;
+      var row = Math.floor(currentFrame / config.cols);
+      sprite.style.backgroundPosition = (-col * DISP_SIZE) + 'px ' + (-row * DISP_SIZE) + 'px';
+      currentFrame = (currentFrame + 1) % total;
     }, 1000 / fps);
   }
 
   // Start in idle
-  startAnimation(IDLE_URL, 6);
+  startAnimation(IDLE_CONFIG, 6);
 
   let talkTimer = null;
 
@@ -441,7 +473,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       var selectedModel = modelSelect ? modelSelect.value : '';
       var reviewerStyle = reviewerInput ? reviewerInput.value : 'Ricky Gervais';
       var baseBranch = branchSelect ? branchSelect.value : '';
-      vscode.postMessage({ type: 'startReview', model: selectedModel, reviewerStyle: reviewerStyle, baseBranch: baseBranch });
+      var extraInstructions = extraInstructionsInput ? extraInstructionsInput.value : '';
+      vscode.postMessage({ type: 'startReview', model: selectedModel, reviewerStyle: reviewerStyle, baseBranch: baseBranch, extraInstructions: extraInstructions });
     });
   }
 
@@ -454,13 +487,18 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     clearTimeout(talkTimer);
     bubble.textContent = text;
     if (state === 'thinking' || state === 'talking' || state === 'laughing') {
-      startAnimation(WALK_URL, state === 'laughing' ? 16 : 10);
-    } else {
-      startAnimation(IDLE_URL, 6);
+      startAnimation(WORK_CONFIG, state === 'laughing' ? 16 : 10);
+    } else if (!isReviewing) {
+      startAnimation(IDLE_CONFIG, 6);
     }
-    talkTimer = setTimeout(function() {
-      startAnimation(IDLE_URL, 6);
-    }, 8000);
+    // Only reset to idle after timeout if not reviewing
+    if (!isReviewing) {
+      talkTimer = setTimeout(function() {
+        if (!isReviewing) {
+          startAnimation(IDLE_CONFIG, 6);
+        }
+      }, 8000);
+    }
   }
 
   function appendLog(text, isError) {
@@ -477,6 +515,61 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   }
 
   function clearLog() { logEl.innerHTML = ''; }
+
+  function resetToInitialState() {
+    // Reset reviewing state
+    isReviewing = false;
+    // Clear log
+    logEl.innerHTML = '';
+    // Reset status
+    setStatus('💤', 'Idle — waiting for review');
+    // Reset bubble
+    bubble.textContent = 'Ready to eviscerate some code…';
+    // Reset animation
+    startAnimation(IDLE_CONFIG, 6);
+    // Restore initial empty state with form
+    container.innerHTML = '<div class="empty-state">' +
+      '<div class="input-row">' +
+        '<label for="branch-select">Compare Against</label>' +
+        '<select id="branch-select" class="model-dropdown">' +
+          '<option value="">Loading branches...</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="input-row">' +
+        '<label for="model-select">Model</label>' +
+        '<select id="model-select" class="model-dropdown">' +
+          '<option value="">Loading models...</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="input-row">' +
+        '<label for="reviewer-input">Reviewer Style</label>' +
+        '<input type="text" id="reviewer-input" class="reviewer-input" value="Ricky Gervais" placeholder="e.g. Gordon Ramsay, a disappointed professor...">' +
+      '</div>' +
+      '<div class="input-row">' +
+        '<label for="extra-instructions">Extra Instructions</label>' +
+        '<textarea id="extra-instructions" class="extra-instructions" rows="3" placeholder="e.g. Focus on security issues, ignore style..."></textarea>' +
+      '</div>' +
+      '<button class="review-btn" id="start-btn">Start Review</button>' +
+    '</div>';
+    // Re-bind elements and events
+    var newStartBtn = document.getElementById('start-btn');
+    var newModelSelect = document.getElementById('model-select');
+    var newReviewerInput = document.getElementById('reviewer-input');
+    var newBranchSelect = document.getElementById('branch-select');
+    var newExtraInstructionsInput = document.getElementById('extra-instructions');
+    if (newStartBtn) {
+      newStartBtn.addEventListener('click', function() {
+        var selectedModel = newModelSelect ? newModelSelect.value : '';
+        var reviewerStyle = newReviewerInput ? newReviewerInput.value : 'Ricky Gervais';
+        var baseBranch = newBranchSelect ? newBranchSelect.value : '';
+        var extraInstructions = newExtraInstructionsInput ? newExtraInstructionsInput.value : '';
+        vscode.postMessage({ type: 'startReview', model: selectedModel, reviewerStyle: reviewerStyle, baseBranch: baseBranch, extraInstructions: extraInstructions });
+      });
+    }
+    // Request fresh data
+    vscode.postMessage({ type: 'requestModels' });
+    vscode.postMessage({ type: 'requestBranches' });
+  }
 
   function renderFindings(findings) {
     if (!findings || findings.length === 0) {
@@ -553,9 +646,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       case 'clearLog':
         clearLog();
         setStatus('🚀', 'Review in progress…');
-        startAnimation(WALK_URL, 10);
+        startAnimation(WORK_CONFIG, 10);
         break;
       case 'reviewingState':
+        isReviewing = msg.isReviewing;
         if (startBtn) {
           startBtn.style.display = msg.isReviewing ? 'none' : 'inline-block';
         }
@@ -567,6 +661,15 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         }
         if (branchSelect) {
           branchSelect.disabled = msg.isReviewing;
+        }
+        if (extraInstructionsInput) {
+          extraInstructionsInput.disabled = msg.isReviewing;
+        }
+        // Start work animation when reviewing starts, go to idle when done
+        if (msg.isReviewing) {
+          startAnimation(WORK_CONFIG, 10);
+        } else {
+          startAnimation(IDLE_CONFIG, 6);
         }
         break;
       case 'models':
@@ -611,6 +714,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             }
           }
         }
+        break;
+      case 'reset':
+        resetToInitialState();
         break;
     }
   });

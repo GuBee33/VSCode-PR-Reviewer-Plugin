@@ -34,6 +34,11 @@
         "title": "PR Reviewer: Clear All Review Decorations"
       },
       {
+        "command": "prReviewer.resetPanel",
+        "title": "PR Reviewer: Reset Panel",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "prReviewer.openSettings",
         "title": "PR Reviewer: Settings",
         "icon": "$(gear)"
@@ -65,44 +70,58 @@
           "group": "navigation@1"
         },
         {
-          "command": "prReviewer.openSettings",
+          "command": "prReviewer.resetPanel",
           "when": "view == prReviewer.characterView",
           "group": "navigation@2"
+        },
+        {
+          "command": "prReviewer.openSettings",
+          "when": "view == prReviewer.characterView",
+          "group": "navigation@3"
         }
       ]
     },
     "configuration": {
       "title": "PR Reviewer",
       "properties": {
-        "prReviewer.extraInstructions": {
+        "prReviewer.customIdleSprite": {
           "type": "string",
           "default": "",
-          "description": "Additional instructions appended to the review prompt, e.g. 'Focus on security issues only'."
+          "description": "Absolute path to a custom sprite sheet PNG for idle animation. Leave empty to use the bundled character."
         },
-        "prReviewer.spritesheetPath": {
+        "prReviewer.idleSpriteRows": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "description": "Number of rows in the idle sprite sheet."
+        },
+        "prReviewer.idleSpriteCols": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "description": "Number of columns in the idle sprite sheet."
+        },
+        "prReviewer.customWorkSprite": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to a custom PNG sprite sheet. Leave empty to use the bundled GuBee_SpriteSheet.png."
+          "description": "Absolute path to a custom sprite sheet PNG for working animation. Leave empty to use the bundled character."
         },
-        "prReviewer.spriteFrameWidth": {
+        "prReviewer.workSpriteRows": {
           "type": "number",
-          "default": 128,
-          "description": "Display width (px) of a single frame. Defaults to 128 (tuned for the bundled GuBee sprite sheet)."
+          "default": 5,
+          "minimum": 1,
+          "description": "Number of rows in the work sprite sheet."
         },
-        "prReviewer.spriteFrameHeight": {
+        "prReviewer.workSpriteCols": {
           "type": "number",
-          "default": 192,
-          "description": "Display height (px) of a single frame. Defaults to 192 (tuned for the bundled GuBee sprite sheet)."
+          "default": 5,
+          "minimum": 1,
+          "description": "Number of columns in the work sprite sheet."
         },
-        "prReviewer.spriteFrameCount": {
-          "type": "number",
-          "default": 4,
-          "description": "Number of animation frames per row in the sprite sheet. Defaults to 4."
-        },
-        "prReviewer.spriteRowCount": {
-          "type": "number",
-          "default": 4,
-          "description": "Number of animation rows in the sprite sheet (one per character state: idle, thinking, talking, laughing). Defaults to 4."
+        "prReviewer.debugOutput": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable debug output in the 'PR Reviewer' output channel. Useful for troubleshooting."
         }
       }
     }
