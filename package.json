@@ -4,6 +4,10 @@
   "description": "Review pull requests with GitHub Copilot, narrated by an animated cartoon character in the style of Ricky Gervais.",
   "version": "0.1.0",
   "publisher": "GuBee33",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GuBee33/VSCode-PR-Reviewer-Plugin"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -70,20 +74,10 @@
     "configuration": {
       "title": "PR Reviewer",
       "properties": {
-        "prReviewer.reviewerStyle": {
-          "type": "string",
-          "default": "Ricky Gervais",
-          "description": "The persona / reviewer style used when prompting Copilot. Default is 'Ricky Gervais'. You can set this to any style you like, e.g. 'Gordon Ramsay', 'a disappointed professor', etc."
-        },
         "prReviewer.extraInstructions": {
           "type": "string",
           "default": "",
           "description": "Additional instructions appended to the review prompt, e.g. 'Focus on security issues only'."
-        },
-        "prReviewer.baseBranch": {
-          "type": "string",
-          "default": "main",
-          "description": "The base branch to diff against when no upstream PR is detected (e.g. 'main' or 'develop')."
         },
         "prReviewer.spritesheetPath": {
           "type": "string",
@@ -109,11 +103,6 @@
           "type": "number",
           "default": 4,
           "description": "Number of animation rows in the sprite sheet (one per character state: idle, thinking, talking, laughing). Defaults to 4."
-        },
-        "prReviewer.model": {
-          "type": "string",
-          "default": "copilot-gpt-4o",
-          "description": "The Copilot language model to use. Must be a model ID accessible through the VS Code Language Model API (e.g. 'copilot-gpt-4o', 'copilot-gpt-4')."
         }
       }
     }

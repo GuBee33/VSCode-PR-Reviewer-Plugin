@@ -1,16 +1,16 @@
 import * as vscode from 'vscode';
 import { execSync } from 'child_process';
+import { outputChannel } from './extension';
 
 /**
- * Fetches the current PR / branch diff relative to the configured base branch.
- * Falls back to 'main' if no base branch is configured.
+ * Fetches the current PR / branch diff relative to the specified base branch.
+ * If the base branch is the same as the current branch, shows uncommitted changes.
  */
 export class PrDiffFetcher {
     private readonly baseBranch: string;
 
-    constructor() {
-        const config = vscode.workspace.getConfiguration('prReviewer');
-        this.baseBranch = config.get<string>('baseBranch', 'main');
+    constructor(baseBranch?: string) {
+        this.baseBranch = baseBranch || 'main';
     }
 
     async getDiff(): Promise<string> {
@@ -20,9 +20,41 @@ export class PrDiffFetcher {
             throw new Error('No workspace folder is open. Please open a Git repository.');
         }
 
-        // Try to get the diff against the base branch merge-base.
-        // This mirrors what a GitHub PR diff shows.
-        const diff = this.runGit(workspaceRoot, this.buildDiffCommand(workspaceRoot));
+        // Get current branch
+        const currentBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+            cwd: workspaceRoot,
+            stdio: ['pipe', 'pipe', 'pipe']
+        }).toString().trim();
+
+        outputChannel.appendLine(`[Diff] Workspace root: ${workspaceRoot}`);
+        outputChannel.appendLine(`[Diff] Current branch: ${currentBranch}`);
+        outputChannel.appendLine(`[Diff] Base branch: ${this.baseBranch}`);
+
+        // If same branch, show uncommitted changes (staged + unstaged)
+        if (currentBranch === this.baseBranch) {
+            outputChannel.appendLine(`[Diff] Same branch - showing uncommitted changes`);
+            const diffCmd = `git diff HEAD -- . ${PrDiffFetcher.DIFF_EXCLUDES}`;
+            outputChannel.appendLine(`[Diff] Command: ${diffCmd}`);
+            
+            const diff = this.runGit(workspaceRoot, diffCmd);
+            
+            outputChannel.appendLine(`[Diff] Total length: ${diff.length} chars`);
+            outputChannel.appendLine(`[Diff] Preview (first 500 chars):\n${diff.slice(0, 500)}`);
+            outputChannel.appendLine('---');
+            
+            return diff;
+        }
+
+        // Different branch - show diff against base branch
+        const diffCmd = this.buildDiffCommand(workspaceRoot);
+        outputChannel.appendLine(`[Diff] Command: ${diffCmd}`);
+        
+        const diff = this.runGit(workspaceRoot, diffCmd);
+        
+        outputChannel.appendLine(`[Diff] Total length: ${diff.length} chars`);
+        outputChannel.appendLine(`[Diff] Preview (first 500 chars):\n${diff.slice(0, 500)}`);
+        outputChannel.appendLine('---');
+        
         return diff;
     }
 
@@ -37,12 +69,15 @@ export class PrDiffFetcher {
             ).toString().trim();
 
             if (mergeBase) {
+                outputChannel.appendLine(`[Diff] Merge-base found: ${mergeBase}`);
                 return `git diff ${mergeBase} HEAD -- . ${PrDiffFetcher.DIFF_EXCLUDES}`;
             }
-        } catch {
+        } catch (e) {
+            outputChannel.appendLine(`[Diff] Merge-base failed: ${e}`);
             // merge-base failed – fall through to simple diff
         }
 
+        outputChannel.appendLine(`[Diff] Using fallback diff: ${this.baseBranch}...HEAD`);
         return `git diff ${this.baseBranch}...HEAD -- . ${PrDiffFetcher.DIFF_EXCLUDES}`;
     }
 
@@ -54,8 +89,10 @@ export class PrDiffFetcher {
                 stdio: ['pipe', 'pipe', 'pipe']
             }).toString();
         } catch (err) {
+            outputChannel.appendLine(`[Diff] Primary command failed: ${err}`);
             // If the base branch doesn't exist locally, try a simple HEAD diff
             const fallbackCmd = `git diff HEAD~1 HEAD -- . ${PrDiffFetcher.DIFF_EXCLUDES}`;
+            outputChannel.appendLine(`[Diff] Trying fallback: ${fallbackCmd}`);
             try {
                 return execSync(fallbackCmd, {
                     cwd,

@@ -6,8 +6,12 @@ import { CopilotReviewer } from './copilotReviewer';
 import { CodeDecorator } from './codeDecorator';
 
 let decorator: CodeDecorator | undefined;
+export let outputChannel: vscode.OutputChannel;
 
 export function activate(context: vscode.ExtensionContext): void {
+    outputChannel = vscode.window.createOutputChannel('PR Reviewer');
+    context.subscriptions.push(outputChannel);
+    
     decorator = new CodeDecorator(context);
 
     // Sidebar character view
@@ -25,9 +29,9 @@ export function activate(context: vscode.ExtensionContext): void {
     // The webview posts { type: 'startReview' } which triggers the command
     // This is handled inside SidebarViewProvider via onDidReceiveMessage
 
-    const reviewCmd = vscode.commands.registerCommand('prReviewer.reviewPR', async () => {
+    const reviewCmd = vscode.commands.registerCommand('prReviewer.reviewPR', async (model?: string, reviewerStyle?: string, baseBranch?: string) => {
         sidebarProvider.reveal();
-        await runReview(context, decorator!, sidebarProvider, statusBar);
+        await runReview(context, decorator!, sidebarProvider, statusBar, model, reviewerStyle, baseBranch);
     });
 
     const clearCmd = vscode.commands.registerCommand('prReviewer.clearDecorations', () => {
@@ -50,16 +54,20 @@ async function runReview(
     context: vscode.ExtensionContext,
     decorator: CodeDecorator,
     sidebar: SidebarViewProvider,
-    statusBar: StatusBarCharacter
+    statusBar: StatusBarCharacter,
+    modelOverride?: string,
+    reviewerStyleOverride?: string,
+    baseBranchOverride?: string
 ): Promise<void> {
     try {
+        sidebar.setReviewingState(true);
         sidebar.clearLog();
         sidebar.appendLog('🚀 Review started');
         sidebar.showMessage('🎬 Alright, let\'s see what catastrophe you\'ve cooked up this time…', 'thinking');
         statusBar.setState('thinking', 'Starting review…');
 
         // 1. Fetch the diff
-        const fetcher = new PrDiffFetcher();
+        const fetcher = new PrDiffFetcher(baseBranchOverride);
         sidebar.showMessage('📂 Fetching your so-called "changes"…', 'thinking');
         sidebar.appendLog('📂 Fetching diff from git…');
         statusBar.setState('thinking', 'Fetching diff…');
@@ -72,6 +80,7 @@ async function runReview(
                 'idle'
             );
             statusBar.setState('done', 'Nothing to review');
+            sidebar.setReviewingState(false);
             return;
         }
 
@@ -82,7 +91,7 @@ async function runReview(
         sidebar.showMessage('🤔 Reading this… utter disaster…', 'thinking');
         sidebar.appendLog('🤖 Sending diff to Copilot for review…');
         statusBar.setState('thinking', `Reviewing ${diffLines} lines…`);
-        const reviewer = new CopilotReviewer();
+        const reviewer = new CopilotReviewer(modelOverride, reviewerStyleOverride);
         const findings = await reviewer.review(diff);
 
         if (!findings || findings.length === 0) {
@@ -92,6 +101,7 @@ async function runReview(
                 'idle'
             );
             statusBar.setState('done', 'No issues found');
+            sidebar.setReviewingState(false);
             return;
         }
 
@@ -114,6 +124,7 @@ async function runReview(
         // 4. Present findings in sidebar
         sidebar.showFindings(findings);
         statusBar.setState('done', summary);
+        sidebar.setReviewingState(false);
 
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -121,5 +132,6 @@ async function runReview(
         sidebar.showMessage(`Oh brilliant. An error. "${msg}". Just what I needed.`, 'idle');
         statusBar.setState('error', `Error: ${msg}`);
         vscode.window.showErrorMessage(`PR Reviewer error: ${msg}`);
+        sidebar.setReviewingState(false);
     }
 }

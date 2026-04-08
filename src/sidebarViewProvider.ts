@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { execSync } from 'child_process';
 import { ReviewFinding } from './types';
 
 type CharacterState = 'idle' | 'thinking' | 'talking' | 'laughing';
@@ -43,7 +44,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             if (msg.type === 'navigate') {
                 this.navigateToFile(msg.file, msg.line);
             } else if (msg.type === 'startReview') {
-                void vscode.commands.executeCommand('prReviewer.reviewPR');
+                void vscode.commands.executeCommand('prReviewer.reviewPR', msg.model, msg.reviewerStyle, msg.baseBranch);
+            } else if (msg.type === 'requestModels') {
+                this.sendAvailableModels();
+            } else if (msg.type === 'requestBranches') {
+                this.sendAvailableBranches();
             }
         });
 
@@ -68,6 +73,55 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 
     clearLog(): void {
         this.postMessage({ type: 'clearLog' });
+    }
+
+    /** Hide or show the Start Review button based on review state. */
+    setReviewingState(isReviewing: boolean): void {
+        this.postMessage({ type: 'reviewingState', isReviewing });
+    }
+
+    /** Send available language models to the webview. */
+    private async sendAvailableModels(): Promise<void> {
+        try {
+            const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+            const modelIds = models.map(m => m.family);
+            // Remove duplicates
+            const uniqueModels = [...new Set(modelIds)];
+            // Default to first available model or copilot-gpt-4o
+            const currentModel = uniqueModels[0] || 'copilot-gpt-4o';
+            this.postMessage({ type: 'models', models: uniqueModels, currentModel });
+        } catch {
+            this.postMessage({ type: 'models', models: [], currentModel: 'copilot-gpt-4o' });
+        }
+    }
+
+    /** Send available git branches to the webview. */
+    private sendAvailableBranches(): void {
+        try {
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!workspaceRoot) {
+                this.postMessage({ type: 'branches', branches: [], currentBranch: '' });
+                return;
+            }
+
+            // Get current branch
+            const currentBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+                cwd: workspaceRoot,
+                stdio: ['pipe', 'pipe', 'pipe']
+            }).toString().trim();
+
+            // Get all local branches
+            const branchOutput = execSync('git branch --format="%(refname:short)"', {
+                cwd: workspaceRoot,
+                stdio: ['pipe', 'pipe', 'pipe']
+            }).toString().trim();
+            
+            const branches = branchOutput.split('\n').filter(b => b.length > 0);
+
+            this.postMessage({ type: 'branches', branches, currentBranch });
+        } catch {
+            this.postMessage({ type: 'branches', branches: [], currentBranch: '' });
+        }
     }
 
     /** Make the sidebar visible. */
@@ -271,6 +325,23 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     border: none; border-radius: 4px; cursor: pointer; font-size: 0.85em;
   }
   .review-btn:hover { background: var(--vscode-button-hoverBackground); }
+  .model-row { margin-bottom: 10px; }
+  .model-dropdown {
+    width: 100%; padding: 6px 8px;
+    background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground);
+    border: 1px solid var(--vscode-dropdown-border, #555); border-radius: 4px;
+    font-size: 0.85em; cursor: pointer;
+  }
+  .model-dropdown:focus { outline: 1px solid var(--vscode-focusBorder); }
+  .input-row { margin-bottom: 10px; }
+  .input-row label { display: block; font-size: 0.75em; color: var(--vscode-descriptionForeground); margin-bottom: 4px; text-align: left; }
+  .reviewer-input {
+    width: 100%; padding: 6px 8px;
+    background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, #555); border-radius: 4px;
+    font-size: 0.85em;
+  }
+  .reviewer-input:focus { outline: 1px solid var(--vscode-focusBorder); }
 </style>
 </head>
 <body>
@@ -294,8 +365,22 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 
 <div id="findings-container">
   <div class="empty-state">
-    Click <strong>▶</strong> above or run<br>
-    <em>PR Reviewer: Review Current PR</em><br>
+    <div class="input-row">
+      <label for="branch-select">Compare Against</label>
+      <select id="branch-select" class="model-dropdown">
+        <option value="">Loading branches...</option>
+      </select>
+    </div>
+    <div class="input-row">
+      <label for="model-select">Model</label>
+      <select id="model-select" class="model-dropdown">
+        <option value="">Loading models...</option>
+      </select>
+    </div>
+    <div class="input-row">
+      <label for="reviewer-input">Reviewer Style</label>
+      <input type="text" id="reviewer-input" class="reviewer-input" value="Ricky Gervais" placeholder="e.g. Gordon Ramsay, a disappointed professor...">
+    </div>
     <button class="review-btn" id="start-btn">Start Review</button>
   </div>
 </div>
@@ -310,6 +395,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   const statusIcon = document.getElementById('status-icon');
   const statusText = document.getElementById('status-text');
   const startBtn = document.getElementById('start-btn');
+  const modelSelect = document.getElementById('model-select');
+  const reviewerInput = document.getElementById('reviewer-input');
+  const branchSelect = document.getElementById('branch-select');
 
   // Sprite animation config
   const IDLE_URL = '${idleUri}';
@@ -344,9 +432,16 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 
   let talkTimer = null;
 
+  // Request available models and branches on load
+  vscode.postMessage({ type: 'requestModels' });
+  vscode.postMessage({ type: 'requestBranches' });
+
   if (startBtn) {
     startBtn.addEventListener('click', function() {
-      vscode.postMessage({ type: 'startReview' });
+      var selectedModel = modelSelect ? modelSelect.value : '';
+      var reviewerStyle = reviewerInput ? reviewerInput.value : 'Ricky Gervais';
+      var baseBranch = branchSelect ? branchSelect.value : '';
+      vscode.postMessage({ type: 'startReview', model: selectedModel, reviewerStyle: reviewerStyle, baseBranch: baseBranch });
     });
   }
 
@@ -459,6 +554,63 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         clearLog();
         setStatus('🚀', 'Review in progress…');
         startAnimation(WALK_URL, 10);
+        break;
+      case 'reviewingState':
+        if (startBtn) {
+          startBtn.style.display = msg.isReviewing ? 'none' : 'inline-block';
+        }
+        if (modelSelect) {
+          modelSelect.disabled = msg.isReviewing;
+        }
+        if (reviewerInput) {
+          reviewerInput.disabled = msg.isReviewing;
+        }
+        if (branchSelect) {
+          branchSelect.disabled = msg.isReviewing;
+        }
+        break;
+      case 'models':
+        if (modelSelect) {
+          modelSelect.innerHTML = '';
+          var models = msg.models || [];
+          if (models.length === 0) {
+            var opt = document.createElement('option');
+            opt.value = 'copilot-gpt-4o';
+            opt.textContent = 'copilot-gpt-4o (default)';
+            modelSelect.appendChild(opt);
+          } else {
+            for (var i = 0; i < models.length; i++) {
+              var opt = document.createElement('option');
+              opt.value = models[i];
+              opt.textContent = models[i];
+              if (models[i] === msg.currentModel) {
+                opt.selected = true;
+              }
+              modelSelect.appendChild(opt);
+            }
+          }
+        }
+        break;
+      case 'branches':
+        if (branchSelect) {
+          branchSelect.innerHTML = '';
+          var branches = msg.branches || [];
+          var currentBranch = msg.currentBranch || '';
+          // Add current branch option first (for uncommitted changes)
+          var currentOpt = document.createElement('option');
+          currentOpt.value = currentBranch;
+          currentOpt.textContent = currentBranch + ' (uncommitted changes)';
+          branchSelect.appendChild(currentOpt);
+          // Add other branches
+          for (var i = 0; i < branches.length; i++) {
+            if (branches[i] !== currentBranch) {
+              var opt = document.createElement('option');
+              opt.value = branches[i];
+              opt.textContent = branches[i];
+              branchSelect.appendChild(opt);
+            }
+          }
+        }
         break;
     }
   });
