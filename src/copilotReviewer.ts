@@ -16,6 +16,9 @@ export class CopilotReviewer {
     constructor(modelOverride?: string, reviewerStyleOverride?: string, extraInstructionsOverride?: string) {
         this.reviewerStyle = reviewerStyleOverride || 'Ricky Gervais';
         this.extraInstructions = extraInstructionsOverride || '';
+        // Default model: 'copilot-gpt-4o'. If this model family is unavailable
+        // (e.g., Copilot API changes), review() will fall back to any available
+        // Copilot model via selectChatModels({ vendor: 'copilot' }).
         this.modelId = modelOverride || 'copilot-gpt-4o';
     }
 

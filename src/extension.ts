@@ -5,21 +5,36 @@ import { PrDiffFetcher } from './prDiffFetcher';
 import { CopilotReviewer } from './copilotReviewer';
 import { CodeDecorator } from './codeDecorator';
 
+/** Options for the reviewPR command */
+export interface ReviewOptions {
+    model?: string;
+    reviewerStyle?: string;
+    baseBranch?: string;
+    extraInstructions?: string;
+}
+
 let decorator: CodeDecorator | undefined;
 export let outputChannel: vscode.OutputChannel;
 
+/** Cached debug flag – updated via onDidChangeConfiguration */
+let isDebugEnabled = false;
+
+/** Initialize debug flag from configuration */
+function updateDebugFlag(): void {
+    const config = vscode.workspace.getConfiguration('prReviewer');
+    isDebugEnabled = config.get<boolean>('debugOutput', false);
+}
+
 /** Log to output channel only if debug is enabled */
 export function debugLog(message: string): void {
-    const config = vscode.workspace.getConfiguration('prReviewer');
-    if (config.get<boolean>('debugOutput', false)) {
+    if (isDebugEnabled) {
         outputChannel.appendLine(message);
     }
 }
 
 /** Show output channel only if debug is enabled */
 export function showDebugOutput(): void {
-    const config = vscode.workspace.getConfiguration('prReviewer');
-    if (config.get<boolean>('debugOutput', false)) {
+    if (isDebugEnabled) {
         outputChannel.show(true);
     }
 }
@@ -27,6 +42,16 @@ export function showDebugOutput(): void {
 export function activate(context: vscode.ExtensionContext): void {
     outputChannel = vscode.window.createOutputChannel('PR Reviewer');
     context.subscriptions.push(outputChannel);
+
+    // Initialize and subscribe to debug flag changes
+    updateDebugFlag();
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration((e) => {
+            if (e.affectsConfiguration('prReviewer.debugOutput')) {
+                updateDebugFlag();
+            }
+        })
+    );
     
     decorator = new CodeDecorator(context);
 
@@ -45,9 +70,34 @@ export function activate(context: vscode.ExtensionContext): void {
     // The webview posts { type: 'startReview' } which triggers the command
     // This is handled inside SidebarViewProvider via onDidReceiveMessage
 
-    const reviewCmd = vscode.commands.registerCommand('prReviewer.reviewPR', async (model?: string, reviewerStyle?: string, baseBranch?: string, extraInstructions?: string) => {
+    const reviewCmd = vscode.commands.registerCommand('prReviewer.reviewPR', async (options?: ReviewOptions | string, reviewerStyle?: string, baseBranch?: string, extraInstructions?: string) => {
+        // Support both new options object API and legacy positional parameters
+        let opts: ReviewOptions;
+        if (typeof options === 'object' && options !== null) {
+            opts = options;
+        } else {
+            // Legacy positional API (deprecated)
+            if (options !== undefined || reviewerStyle !== undefined || baseBranch !== undefined || extraInstructions !== undefined) {
+                debugLog('[Deprecated] Using legacy positional API for reviewPR command. Use { model, reviewerStyle, baseBranch, extraInstructions } object instead.');
+            }
+            opts = {
+                model: typeof options === 'string' ? options : undefined,
+                reviewerStyle: typeof reviewerStyle === 'string' ? reviewerStyle : undefined,
+                baseBranch: typeof baseBranch === 'string' ? baseBranch : undefined,
+                extraInstructions: typeof extraInstructions === 'string' ? extraInstructions : undefined
+            };
+        }
+        
+        // Runtime validation for opts fields (commands can pass arbitrary args)
+        const validatedOpts: ReviewOptions = {
+            model: typeof opts.model === 'string' ? opts.model : undefined,
+            reviewerStyle: typeof opts.reviewerStyle === 'string' ? opts.reviewerStyle : undefined,
+            baseBranch: typeof opts.baseBranch === 'string' ? opts.baseBranch : undefined,
+            extraInstructions: typeof opts.extraInstructions === 'string' ? opts.extraInstructions : undefined
+        };
+        
         sidebarProvider.reveal();
-        await runReview(context, decorator!, sidebarProvider, statusBar, model, reviewerStyle, baseBranch, extraInstructions);
+        await runReview(context, decorator!, sidebarProvider, statusBar, validatedOpts);
     });
 
     const clearCmd = vscode.commands.registerCommand('prReviewer.clearDecorations', () => {
@@ -64,7 +114,50 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.commands.executeCommand('workbench.action.openSettings', 'prReviewer');
     });
 
-    context.subscriptions.push(sidebarReg, statusBar, reviewCmd, clearCmd, resetCmd, settingsCmd, decorator);
+    // Sprite file browser commands
+    const browseIdleSpriteCmd = vscode.commands.registerCommand('prReviewer.browseIdleSprite', async () => {
+        const result = await vscode.window.showOpenDialog({
+            canSelectFiles: true,
+            canSelectFolders: false,
+            canSelectMany: false,
+            filters: { 'PNG Images': ['png'] },
+            title: 'Select Idle Sprite Sheet'
+        });
+        if (result && result[0]) {
+            const config = vscode.workspace.getConfiguration('prReviewer');
+            await config.update('customIdleSprite', result[0].fsPath, vscode.ConfigurationTarget.Global);
+            vscode.window.showInformationMessage(`Idle sprite set to: ${result[0].fsPath}`);
+        }
+    });
+
+    const browseWorkSpriteCmd = vscode.commands.registerCommand('prReviewer.browseWorkSprite', async () => {
+        const result = await vscode.window.showOpenDialog({
+            canSelectFiles: true,
+            canSelectFolders: false,
+            canSelectMany: false,
+            filters: { 'PNG Images': ['png'] },
+            title: 'Select Work Sprite Sheet'
+        });
+        if (result && result[0]) {
+            const config = vscode.workspace.getConfiguration('prReviewer');
+            await config.update('customWorkSprite', result[0].fsPath, vscode.ConfigurationTarget.Global);
+            vscode.window.showInformationMessage(`Work sprite set to: ${result[0].fsPath}`);
+        }
+    });
+
+    const clearIdleSpriteCmd = vscode.commands.registerCommand('prReviewer.clearIdleSprite', async () => {
+        const config = vscode.workspace.getConfiguration('prReviewer');
+        await config.update('customIdleSprite', '', vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage('Custom idle sprite cleared. Using default.');
+    });
+
+    const clearWorkSpriteCmd = vscode.commands.registerCommand('prReviewer.clearWorkSprite', async () => {
+        const config = vscode.workspace.getConfiguration('prReviewer');
+        await config.update('customWorkSprite', '', vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage('Custom work sprite cleared. Using default.');
+    });
+
+    context.subscriptions.push(sidebarReg, statusBar, reviewCmd, clearCmd, resetCmd, settingsCmd, browseIdleSpriteCmd, browseWorkSpriteCmd, clearIdleSpriteCmd, clearWorkSpriteCmd, decorator);
 }
 
 export function deactivate(): void {
@@ -76,11 +169,9 @@ async function runReview(
     decorator: CodeDecorator,
     sidebar: SidebarViewProvider,
     statusBar: StatusBarCharacter,
-    modelOverride?: string,
-    reviewerStyleOverride?: string,
-    baseBranchOverride?: string,
-    extraInstructionsOverride?: string
+    options: ReviewOptions = {}
 ): Promise<void> {
+    const { model: modelOverride, reviewerStyle: reviewerStyleOverride, baseBranch: baseBranchOverride, extraInstructions: extraInstructionsOverride } = options;
     try {
         sidebar.setReviewingState(true);
         sidebar.clearLog();

@@ -36,12 +36,29 @@
       {
         "command": "prReviewer.resetPanel",
         "title": "PR Reviewer: Reset Panel",
-        "icon": "$(refresh)"
+        "icon": "$(refresh)",
+        "enablement": "view == prReviewer.characterView"
       },
       {
         "command": "prReviewer.openSettings",
         "title": "PR Reviewer: Settings",
         "icon": "$(gear)"
+      },
+      {
+        "command": "prReviewer.browseIdleSprite",
+        "title": "PR Reviewer: Browse Idle Sprite..."
+      },
+      {
+        "command": "prReviewer.browseWorkSprite",
+        "title": "PR Reviewer: Browse Work Sprite..."
+      },
+      {
+        "command": "prReviewer.clearIdleSprite",
+        "title": "PR Reviewer: Clear Custom Idle Sprite"
+      },
+      {
+        "command": "prReviewer.clearWorkSprite",
+        "title": "PR Reviewer: Clear Custom Work Sprite"
       }
     ],
     "viewsContainers": {
@@ -87,7 +104,7 @@
         "prReviewer.customIdleSprite": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to a custom sprite sheet PNG for idle animation. Leave empty to use the bundled character."
+          "description": "Path to a custom sprite sheet PNG for idle animation. Use command 'PR Reviewer: Browse Idle Sprite...' to select a file. Leave empty to use the bundled character."
         },
         "prReviewer.idleSpriteRows": {
           "type": "number",
@@ -104,7 +121,7 @@
         "prReviewer.customWorkSprite": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to a custom sprite sheet PNG for working animation. Leave empty to use the bundled character."
+          "description": "Path to a custom sprite sheet PNG for working animation. Use command 'PR Reviewer: Browse Work Sprite...' to select a file. Leave empty to use the bundled character."
         },
         "prReviewer.workSpriteRows": {
           "type": "number",

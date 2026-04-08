@@ -11,6 +11,13 @@ echo ""
 echo "==> PR Reviewer - install script"
 echo ""
 
+# Check for Node.js (required for reading package.json)
+if ! command -v node &> /dev/null; then
+    echo "Error: Node.js is required but not found."
+    echo "Please install Node.js from https://nodejs.org/ and try again."
+    exit 1
+fi
+
 # Read version and name from package.json
 PKG_NAME=$(node -p "require('./package.json').name")
 PKG_VERSION=$(node -p "require('./package.json').version")

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { ReviewFinding } from './types';
+import { debugLog } from './extension';
 
 type CharacterState = 'idle' | 'thinking' | 'talking' | 'laughing';
 
@@ -14,6 +15,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 
     private view?: vscode.WebviewView;
     private pendingMessages: Array<Record<string, unknown>> = [];
+    private configWatcher?: vscode.Disposable;
+    private isHtmlReady = false;
 
     constructor(private readonly extensionUri: vscode.Uri) {}
 
@@ -23,21 +26,30 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         _token: vscode.CancellationToken
     ): void {
         this.view = webviewView;
+        this.isHtmlReady = false;
+
+        // Dispose previous config watcher if re-resolving
+        this.configWatcher?.dispose();
 
         webviewView.webview.options = {
             enableScripts: true,
-            localResourceRoots: [
-                vscode.Uri.file(path.join(this.extensionUri.fsPath, 'media')),
-            ],
+            localResourceRoots: this.buildLocalResourceRoots(),
         };
 
-        webviewView.webview.html = this.buildHtml(webviewView.webview);
-
-        // Flush any messages that arrived before the view was ready
-        for (const msg of this.pendingMessages) {
-            void webviewView.webview.postMessage(msg);
-        }
-        this.pendingMessages = [];
+        // Build HTML async to support async sprite validation
+        void this.buildHtml(webviewView.webview).then(html => {
+            webviewView.webview.html = html;
+            this.isHtmlReady = true;
+            // Flush any messages that arrived before the view was ready
+            for (const msg of this.pendingMessages) {
+                void webviewView.webview.postMessage(msg);
+            }
+            this.pendingMessages = [];
+        }).catch(err => {
+            debugLog(`[Panel] Failed to build HTML: ${err}`);
+            webviewView.webview.html = '<html><body>Error loading panel.</body></html>';
+            this.isHtmlReady = true;
+        });
 
         // Handle messages from the webview
         webviewView.webview.onDidReceiveMessage((msg) => {
@@ -52,9 +64,65 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             }
         });
 
+        // Watch for sprite config changes and reload webview
+        this.configWatcher = vscode.workspace.onDidChangeConfiguration((e) => {
+            if (e.affectsConfiguration('prReviewer.customIdleSprite') || 
+                e.affectsConfiguration('prReviewer.customWorkSprite')) {
+                debugLog('[Webview] Sprite config changed, reloading webview...');
+                // Update localResourceRoots with new sprite directories
+                this.updateWebviewOptions(webviewView);
+                // Rebuild HTML with new sprite
+                this.isHtmlReady = false;
+                void this.buildHtml(webviewView.webview).then(html => {
+                    webviewView.webview.html = html;
+                    this.isHtmlReady = true;
+                }).catch(err => {
+                    debugLog(`[Panel] Failed to rebuild HTML: ${err}`);
+                    this.isHtmlReady = true;
+                });
+            }
+        });
+        
+        // Clean up on dispose
         webviewView.onDidDispose(() => {
             this.view = undefined;
+            this.configWatcher?.dispose();
+            this.configWatcher = undefined;
         });
+    }
+
+    /** Build localResourceRoots including custom sprite directories */
+    private buildLocalResourceRoots(): vscode.Uri[] {
+        const roots: vscode.Uri[] = [
+            vscode.Uri.file(path.join(this.extensionUri.fsPath, 'media')),
+        ];
+
+        const config = vscode.workspace.getConfiguration('prReviewer');
+        const customIdle = config.get<string>('customIdleSprite', '');
+        const customWork = config.get<string>('customWorkSprite', '');
+        
+        if (customIdle) {
+            const idleDir = path.dirname(customIdle);
+            roots.push(vscode.Uri.file(idleDir));
+            debugLog(`[Webview] Added localResourceRoot: ${idleDir}`);
+        }
+        if (customWork) {
+            const workDir = path.dirname(customWork);
+            if (workDir !== path.dirname(customIdle)) {
+                roots.push(vscode.Uri.file(workDir));
+                debugLog(`[Webview] Added localResourceRoot: ${workDir}`);
+            }
+        }
+
+        return roots;
+    }
+
+    /** Update webview options with current sprite directories */
+    private updateWebviewOptions(webviewView: vscode.WebviewView): void {
+        webviewView.webview.options = {
+            enableScripts: true,
+            localResourceRoots: this.buildLocalResourceRoots(),
+        };
     }
 
     // ── Public API used by the review flow ──────────────────────────
@@ -82,6 +150,13 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 
     /** Reset the panel to initial state. */
     resetPanel(): void {
+        if (!this.view) {
+            debugLog('[Panel] resetPanel called but webview not resolved - attempting reveal');
+            this.reveal();
+            // Queue the reset message so it's flushed when the view resolves
+            this.pendingMessages.push({ type: 'reset' });
+            return;
+        }
         this.postMessage({ type: 'reset' });
     }
 
@@ -142,7 +217,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     // ── Internals ───────────────────────────────────────────────────
 
     private postMessage(msg: Record<string, unknown>): void {
-        if (this.view) {
+        if (this.view && this.isHtmlReady) {
             void this.view.webview.postMessage(msg);
         } else {
             this.pendingMessages.push(msg);
@@ -171,19 +246,53 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         return webview.asWebviewUri(builtIn);
     }
 
-    private getCustomSpriteUri(webview: vscode.Webview, absolutePath: string): vscode.Uri | null {
+    private async getCustomSpriteUri(webview: vscode.Webview, absolutePath: string): Promise<vscode.Uri | null> {
         if (!absolutePath) {
             return null;
         }
+
+        // Validate path: must be a PNG file
+        if (!absolutePath.toLowerCase().endsWith('.png')) {
+            debugLog(`[Sprite] Invalid sprite path (not a .png file): ${absolutePath}`);
+            return null;
+        }
+
+        // Validate against path traversal: resolved path must not escape the workspace
+        const resolved = path.resolve(absolutePath);
+        const normalizedResolved = path.normalize(resolved);
+        
+        // On Windows, paths can have different casing or slash directions but still be valid
+        // Check that normalization produces a consistent result and path is absolute
+        if (!path.isAbsolute(absolutePath)) {
+            debugLog(`[Sprite] Rejected sprite path (not absolute): ${absolutePath}`);
+            return null;
+        }
+        
+        // Validate against workspace folder to prevent arbitrary file access
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceRoot && !normalizedResolved.startsWith(path.normalize(workspaceRoot))) {
+            debugLog(`[Sprite] Rejected sprite path (outside workspace): ${absolutePath}`);
+            return null;
+        }
+
+        // Async file existence check
+        try {
+            await vscode.workspace.fs.stat(vscode.Uri.file(absolutePath));
+        } catch {
+            debugLog(`[Sprite] Custom sprite file not found: ${absolutePath}`);
+            return null;
+        }
+
         try {
             const fileUri = vscode.Uri.file(absolutePath);
             return webview.asWebviewUri(fileUri);
-        } catch {
+        } catch (e) {
+            debugLog(`[Sprite] Failed to load custom sprite: ${absolutePath}: ${e}`);
             return null;
         }
     }
 
-    private buildHtml(webview: vscode.Webview): string {
+    private async buildHtml(webview: vscode.Webview): Promise<string> {
         // Check for custom sprites and their configurations
         const config = vscode.workspace.getConfiguration('prReviewer');
         const customIdle = config.get<string>('customIdleSprite', '');
@@ -193,9 +302,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         const workRows = config.get<number>('workSpriteRows', 5);
         const workCols = config.get<number>('workSpriteCols', 5);
         
-        const idleUri = this.getCustomSpriteUri(webview, customIdle) 
+        const idleUri = (await this.getCustomSpriteUri(webview, customIdle)) 
             || this.getSpriteUri(webview, 'GuBee-idle.png');
-        const workUri = this.getCustomSpriteUri(webview, customWork) 
+        const workUri = (await this.getCustomSpriteUri(webview, customWork)) 
             || this.getSpriteUri(webview, 'GuBee-walk.png');
         const nonce   = getNonce();
 
@@ -208,7 +317,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none';
-               img-src ${webview.cspSource} https: data: file:;
+               img-src ${webview.cspSource} https: data:;
                style-src 'unsafe-inline';
                script-src 'nonce-${nonce}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
