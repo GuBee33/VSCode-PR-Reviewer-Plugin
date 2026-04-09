@@ -56,7 +56,7 @@ export function activate(context: vscode.ExtensionContext): void {
     decorator = new CodeDecorator(context);
 
     // Sidebar character view
-    const sidebarProvider = new SidebarViewProvider(context.extensionUri);
+    const sidebarProvider = new SidebarViewProvider(context.extensionUri, context);
     const sidebarReg = vscode.window.registerWebviewViewProvider(
         SidebarViewProvider.viewId,
         sidebarProvider,

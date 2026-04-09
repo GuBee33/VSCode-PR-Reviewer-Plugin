@@ -17,8 +17,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     private pendingMessages: Array<Record<string, unknown>> = [];
     private configWatcher?: vscode.Disposable;
     private isHtmlReady = false;
+    private readonly context: vscode.ExtensionContext;
 
-    constructor(private readonly extensionUri: vscode.Uri) {}
+    constructor(private readonly extensionUri: vscode.Uri, context: vscode.ExtensionContext) {
+        this.context = context;
+    }
 
     resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -61,13 +64,25 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                 this.sendAvailableModels();
             } else if (msg.type === 'requestBranches') {
                 this.sendAvailableBranches();
+            } else if (msg.type === 'saveSettings') {
+                this.saveSettings(msg.settings);
+            } else if (msg.type === 'loadSettings') {
+                this.sendSavedSettings();
+            } else if (msg.type === 'fixWithCopilot') {
+                this.fixWithCopilot(msg.finding);
+            } else if (msg.type === 'fixAllWithCopilot') {
+                this.fixAllWithCopilot(msg.findings);
             }
         });
 
         // Watch for sprite config changes and reload webview
         this.configWatcher = vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration('prReviewer.customIdleSprite') || 
-                e.affectsConfiguration('prReviewer.customWorkSprite')) {
+                e.affectsConfiguration('prReviewer.customWorkSprite') ||
+                e.affectsConfiguration('prReviewer.idleSpriteRows') ||
+                e.affectsConfiguration('prReviewer.idleSpriteCols') ||
+                e.affectsConfiguration('prReviewer.workSpriteRows') ||
+                e.affectsConfiguration('prReviewer.workSpriteCols')) {
                 debugLog('[Webview] Sprite config changed, reloading webview...');
                 // Update localResourceRoots with new sprite directories
                 this.updateWebviewOptions(webviewView);
@@ -175,6 +190,46 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    /** Save form settings to globalState */
+    private saveSettings(settings: { baseBranch?: string; model?: string; reviewerStyle?: string; extraInstructions?: string }): void {
+        const savedKeys: string[] = [];
+        const maxLength = 1000; // Reasonable limit for settings values
+
+        if (settings.baseBranch !== undefined && typeof settings.baseBranch === 'string' && settings.baseBranch.length <= maxLength) {
+            this.context.globalState.update('prReviewer.baseBranch', settings.baseBranch)
+                .then(undefined, err => debugLog(`[Settings] Failed to save baseBranch: ${err}`));
+            savedKeys.push('baseBranch');
+        }
+        if (settings.model !== undefined && typeof settings.model === 'string' && settings.model.length <= maxLength) {
+            this.context.globalState.update('prReviewer.model', settings.model)
+                .then(undefined, err => debugLog(`[Settings] Failed to save model: ${err}`));
+            savedKeys.push('model');
+        }
+        if (settings.reviewerStyle !== undefined && typeof settings.reviewerStyle === 'string' && settings.reviewerStyle.length <= maxLength) {
+            this.context.globalState.update('prReviewer.reviewerStyle', settings.reviewerStyle)
+                .then(undefined, err => debugLog(`[Settings] Failed to save reviewerStyle: ${err}`));
+            savedKeys.push('reviewerStyle');
+        }
+        if (settings.extraInstructions !== undefined && typeof settings.extraInstructions === 'string' && settings.extraInstructions.length <= maxLength) {
+            this.context.globalState.update('prReviewer.extraInstructions', settings.extraInstructions)
+                .then(undefined, err => debugLog(`[Settings] Failed to save extraInstructions: ${err}`));
+            savedKeys.push('extraInstructions');
+        }
+        debugLog(`[Settings] Saved keys: ${savedKeys.join(', ')}`);
+    }
+
+    /** Send saved settings to webview */
+    private sendSavedSettings(): void {
+        const settings = {
+            baseBranch: this.context.globalState.get<string>('prReviewer.baseBranch', ''),
+            model: this.context.globalState.get<string>('prReviewer.model', ''),
+            reviewerStyle: this.context.globalState.get<string>('prReviewer.reviewerStyle', 'Ricky Gervais'),
+            extraInstructions: this.context.globalState.get<string>('prReviewer.extraInstructions', '')
+        };
+        debugLog(`[Settings] Loading: baseBranch=${settings.baseBranch ? '[set]' : '[empty]'}, model=${settings.model || '[default]'}, reviewerStyle=${settings.reviewerStyle}`);
+        this.postMessage({ type: 'savedSettings', settings });
+    }
+
     /** Send available git branches to the webview. */
     private sendAvailableBranches(): void {
         try {
@@ -237,6 +292,145 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                 preserveFocus: false,
             });
         });
+    }
+
+    /** Fix a single finding using GitHub Copilot Chat */
+    private async fixWithCopilot(finding: unknown): Promise<void> {
+        // Validate finding object from untrusted webview
+        const validated = this.validateFinding(finding);
+        if (!validated) {
+            debugLog('[Fix] Invalid finding data received from webview');
+            return;
+        }
+
+        debugLog(`[Fix] Fixing finding: ${validated.title} in ${validated.file}:${validated.line}`);
+        
+        // Build the fix prompt
+        const prompt = this.buildFixPrompt(validated);
+
+        try {
+            // Open Copilot Chat panel and send the request
+            await vscode.commands.executeCommand('workbench.action.chat.open', {
+                query: prompt,
+                isPartialQuery: false  // This triggers auto-send
+            });
+            debugLog(`[Fix] Sent fix request to Copilot Chat for ${validated.file}:${validated.line}`);
+        } catch (err) {
+            debugLog(`[Fix] Error: ${err}`);
+            vscode.window.showErrorMessage(`Failed to fix: ${err}`);
+        }
+    }
+
+    /** Fix all findings using GitHub Copilot Chat */
+    private async fixAllWithCopilot(findings: unknown): Promise<void> {
+        // Validate findings array from untrusted webview
+        if (!Array.isArray(findings)) {
+            debugLog('[Fix All] Invalid findings data received from webview');
+            return;
+        }
+
+        const validatedFindings: ReviewFinding[] = [];
+        for (const f of findings) {
+            const validated = this.validateFinding(f);
+            if (validated) {
+                validatedFindings.push(validated);
+            }
+        }
+
+        if (validatedFindings.length === 0) {
+            debugLog('[Fix All] No valid findings to fix');
+            return;
+        }
+
+        debugLog(`[Fix All] Fixing ${validatedFindings.length} findings`);
+        
+        // Group findings by file for efficiency
+        const findingsByFile = new Map<string, ReviewFinding[]>();
+        for (const finding of validatedFindings) {
+            const existing = findingsByFile.get(finding.file) || [];
+            existing.push(finding);
+            findingsByFile.set(finding.file, existing);
+        }
+
+        // Build a comprehensive fix prompt
+        let prompt = 'Fix the following code review issues:\n\n';
+        
+        for (const [file, fileFindings] of findingsByFile) {
+            prompt += `## ${file}\n`;
+            for (const f of fileFindings) {
+                prompt += `- **Line ${f.line}** (${f.severity}): ${f.title}\n`;
+                prompt += `  ${f.message}\n`;
+                if (f.suggestion) {
+                    prompt += `  Suggestion: ${f.suggestion}\n`;
+                }
+                prompt += '\n';
+            }
+        }
+
+        try {
+            // Open Copilot Chat panel and send the request
+            await vscode.commands.executeCommand('workbench.action.chat.open', {
+                query: prompt,
+                isPartialQuery: false  // This triggers auto-send
+            });
+            debugLog(`[Fix All] Sent fix request to Copilot Chat for ${validatedFindings.length} findings`);
+        } catch (err) {
+            debugLog(`[Fix All] Error: ${err}`);
+            vscode.window.showErrorMessage(`Failed to open fix session: ${err}`);
+        }
+    }
+
+    /** Validate and sanitize a finding object from untrusted webview */
+    private validateFinding(finding: unknown): ReviewFinding | null {
+        if (!finding || typeof finding !== 'object') {
+            return null;
+        }
+
+        const f = finding as Record<string, unknown>;
+        const maxStringLength = 2000;
+        const maxPathLength = 500;
+
+        // Validate required fields
+        if (typeof f.file !== 'string' || f.file.length === 0 || f.file.length > maxPathLength) {
+            return null;
+        }
+        if (typeof f.line !== 'number' || !Number.isInteger(f.line) || f.line < -1 || f.line > 1000000) {
+            return null;
+        }
+        if (typeof f.severity !== 'string' || !['error', 'warning', 'info'].includes(f.severity)) {
+            return null;
+        }
+        if (typeof f.title !== 'string' || f.title.length === 0 || f.title.length > maxStringLength) {
+            return null;
+        }
+        if (typeof f.message !== 'string' || f.message.length > maxStringLength) {
+            return null;
+        }
+
+        // Validate optional fields
+        if (f.suggestion !== undefined && (typeof f.suggestion !== 'string' || f.suggestion.length > maxStringLength)) {
+            return null;
+        }
+
+        return {
+            file: f.file,
+            line: f.line,
+            severity: f.severity as 'error' | 'warning' | 'info',
+            title: f.title,
+            message: f.message,
+            suggestion: typeof f.suggestion === 'string' ? f.suggestion : undefined
+        };
+    }
+
+    /** Build a prompt for fixing a single finding */
+    private buildFixPrompt(finding: ReviewFinding): string {
+        let prompt = `Fix this ${finding.severity} in ${finding.file} at line ${finding.line}:\n\n`;
+        prompt += `**${finding.title}**\n`;
+        prompt += `${finding.message}`;
+        if (finding.suggestion) {
+            prompt += `\n\nSuggested fix: ${finding.suggestion}`;
+        }
+        return prompt;
     }
 
     private getSpriteUri(webview: vscode.Webview, filename: string): vscode.Uri {
@@ -455,6 +649,24 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     border: none; border-radius: 4px; cursor: pointer; font-size: 0.85em;
   }
   .review-btn:hover { background: var(--vscode-button-hoverBackground); }
+  .fix-btn {
+    display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 3px 8px;
+    background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground);
+    border: none; border-radius: 3px; cursor: pointer; font-size: 0.75em;
+  }
+  .fix-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .fix-btn.primary {
+    background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+  }
+  .fix-btn.primary:hover { background: var(--vscode-button-hoverBackground); }
+  .fix-all-btn {
+    display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; padding: 4px 10px;
+    background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+    border: none; border-radius: 4px; cursor: pointer; font-size: 0.8em; vertical-align: middle;
+  }
+  .fix-all-btn:hover { background: var(--vscode-button-hoverBackground); }
+  .findings-header-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .findings-header-row .findings-header { margin-bottom: 0; }
   .model-row { margin-bottom: 10px; }
   .model-dropdown {
     width: 100%; padding: 6px 8px;
@@ -552,7 +764,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   let isReviewing = false;
 
   function startAnimation(config, fps) {
-    var total = config.cols * config.rows;
+    const total = config.cols * config.rows;
     if (currentConfig.url !== config.url) {
       currentConfig = config;
       sprite.style.backgroundImage = "url('" + config.url + "')";
@@ -561,8 +773,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     if (animTimer) clearInterval(animTimer);
     currentFrame = 0;
     animTimer = setInterval(function() {
-      var col = currentFrame % config.cols;
-      var row = Math.floor(currentFrame / config.cols);
+      const col = currentFrame % config.cols;
+      const row = Math.floor(currentFrame / config.cols);
       sprite.style.backgroundPosition = (-col * DISP_SIZE) + 'px ' + (-row * DISP_SIZE) + 'px';
       currentFrame = (currentFrame + 1) % total;
     }, 1000 / fps);
@@ -573,16 +785,80 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 
   let talkTimer = null;
 
-  // Request available models and branches on load
+  // Saved settings (will be populated after load)
+  let savedSettings = { baseBranch: '', model: '', reviewerStyle: 'Ricky Gervais', extraInstructions: '' };
+  let modelsLoaded = false;
+  let branchesLoaded = false;
+  let settingsLoaded = false;
+
+  function applySavedSettings() {
+    if (!settingsLoaded) return;
+    const curBranchSelect = document.getElementById('branch-select');
+    const curModelSelect = document.getElementById('model-select');
+    const curReviewerInput = document.getElementById('reviewer-input');
+    const curExtraInstructionsInput = document.getElementById('extra-instructions');
+    if (branchesLoaded && savedSettings.baseBranch && curBranchSelect) {
+      for (let i = 0; i < curBranchSelect.options.length; i++) {
+        if (curBranchSelect.options[i].value === savedSettings.baseBranch) {
+          curBranchSelect.selectedIndex = i;
+          break;
+        }
+      }
+    }
+    if (modelsLoaded && savedSettings.model && curModelSelect) {
+      for (let i = 0; i < curModelSelect.options.length; i++) {
+        if (curModelSelect.options[i].value === savedSettings.model) {
+          curModelSelect.selectedIndex = i;
+          break;
+        }
+      }
+    }
+    if (savedSettings.reviewerStyle && curReviewerInput) {
+      curReviewerInput.value = savedSettings.reviewerStyle;
+    }
+    if (savedSettings.extraInstructions && curExtraInstructionsInput) {
+      curExtraInstructionsInput.value = savedSettings.extraInstructions;
+    }
+  }
+
+  // Reusable function to attach persistence handlers to form elements
+  function attachPersistenceHandlers(branchEl, modelEl, reviewerEl, extraInstructionsEl) {
+    if (branchEl) {
+      branchEl.addEventListener('change', function() {
+        vscode.postMessage({ type: 'saveSettings', settings: { baseBranch: branchEl.value } });
+      });
+    }
+    if (modelEl) {
+      modelEl.addEventListener('change', function() {
+        vscode.postMessage({ type: 'saveSettings', settings: { model: modelEl.value } });
+      });
+    }
+    if (reviewerEl) {
+      reviewerEl.addEventListener('change', function() {
+        vscode.postMessage({ type: 'saveSettings', settings: { reviewerStyle: reviewerEl.value } });
+      });
+    }
+    if (extraInstructionsEl) {
+      extraInstructionsEl.addEventListener('change', function() {
+        vscode.postMessage({ type: 'saveSettings', settings: { extraInstructions: extraInstructionsEl.value } });
+      });
+    }
+  }
+
+  // Request available models, branches, and saved settings on load
   vscode.postMessage({ type: 'requestModels' });
   vscode.postMessage({ type: 'requestBranches' });
+  vscode.postMessage({ type: 'loadSettings' });
+
+  // Save settings when values change (using reusable function)
+  attachPersistenceHandlers(branchSelect, modelSelect, reviewerInput, extraInstructionsInput);
 
   if (startBtn) {
     startBtn.addEventListener('click', function() {
-      var selectedModel = modelSelect ? modelSelect.value : '';
-      var reviewerStyle = reviewerInput ? reviewerInput.value : 'Ricky Gervais';
-      var baseBranch = branchSelect ? branchSelect.value : '';
-      var extraInstructions = extraInstructionsInput ? extraInstructionsInput.value : '';
+      const selectedModel = modelSelect ? modelSelect.value : '';
+      const reviewerStyle = reviewerInput ? reviewerInput.value : 'Ricky Gervais';
+      const baseBranch = branchSelect ? branchSelect.value : '';
+      const extraInstructions = extraInstructionsInput ? extraInstructionsInput.value : '';
       vscode.postMessage({ type: 'startReview', model: selectedModel, reviewerStyle: reviewerStyle, baseBranch: baseBranch, extraInstructions: extraInstructions });
     });
   }
@@ -611,10 +887,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   }
 
   function appendLog(text, isError) {
-    var line = document.createElement('div');
+    const line = document.createElement('div');
     line.className = isError ? 'log-line error' : 'log-line';
-    var now = new Date();
-    var ts = String(now.getHours()).padStart(2, '0') + ':' +
+    const now = new Date();
+    const ts = String(now.getHours()).padStart(2, '0') + ':' +
              String(now.getMinutes()).padStart(2, '0') + ':' +
              String(now.getSeconds()).padStart(2, '0');
     line.textContent = '[' + ts + '] ' + text;
@@ -661,23 +937,29 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       '<button class="review-btn" id="start-btn">Start Review</button>' +
     '</div>';
     // Re-bind elements and events
-    var newStartBtn = document.getElementById('start-btn');
-    var newModelSelect = document.getElementById('model-select');
-    var newReviewerInput = document.getElementById('reviewer-input');
-    var newBranchSelect = document.getElementById('branch-select');
-    var newExtraInstructionsInput = document.getElementById('extra-instructions');
+    const newStartBtn = document.getElementById('start-btn');
+    const newModelSelect = document.getElementById('model-select');
+    const newReviewerInput = document.getElementById('reviewer-input');
+    const newBranchSelect = document.getElementById('branch-select');
+    const newExtraInstructionsInput = document.getElementById('extra-instructions');
     if (newStartBtn) {
       newStartBtn.addEventListener('click', function() {
-        var selectedModel = newModelSelect ? newModelSelect.value : '';
-        var reviewerStyle = newReviewerInput ? newReviewerInput.value : 'Ricky Gervais';
-        var baseBranch = newBranchSelect ? newBranchSelect.value : '';
-        var extraInstructions = newExtraInstructionsInput ? newExtraInstructionsInput.value : '';
+        const selectedModel = newModelSelect ? newModelSelect.value : '';
+        const reviewerStyle = newReviewerInput ? newReviewerInput.value : 'Ricky Gervais';
+        const baseBranch = newBranchSelect ? newBranchSelect.value : '';
+        const extraInstructions = newExtraInstructionsInput ? newExtraInstructionsInput.value : '';
         vscode.postMessage({ type: 'startReview', model: selectedModel, reviewerStyle: reviewerStyle, baseBranch: baseBranch, extraInstructions: extraInstructions });
       });
     }
-    // Request fresh data
+    // Add change handlers for persistence (using reusable function)
+    attachPersistenceHandlers(newBranchSelect, newModelSelect, newReviewerInput, newExtraInstructionsInput);
+    // Reset loaded flags and request fresh data
+    modelsLoaded = false;
+    branchesLoaded = false;
+    settingsLoaded = false;
     vscode.postMessage({ type: 'requestModels' });
     vscode.postMessage({ type: 'requestBranches' });
+    vscode.postMessage({ type: 'loadSettings' });
   }
 
   function renderFindings(findings) {
@@ -688,38 +970,69 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    var errors   = findings.filter(function(f) { return f.severity === 'error'; }).length;
-    var warnings = findings.filter(function(f) { return f.severity === 'warning'; }).length;
-    var infos    = findings.filter(function(f) { return f.severity === 'info'; }).length;
+    // Store findings for fix-all functionality
+    window.currentFindings = findings;
 
-    var summaryLine = 'Found ' + findings.length + ' issue' + (findings.length !== 1 ? 's' : '') + ': ' +
+    const errors   = findings.filter(function(f) { return f.severity === 'error'; }).length;
+    const warnings = findings.filter(function(f) { return f.severity === 'warning'; }).length;
+    const infos    = findings.filter(function(f) { return f.severity === 'info'; }).length;
+
+    const summaryLine = 'Found ' + findings.length + ' issue' + (findings.length !== 1 ? 's' : '') + ': ' +
       errors + ' error' + (errors !== 1 ? 's' : '') + ', ' +
       warnings + ' warning' + (warnings !== 1 ? 's' : '') + ', ' +
       infos + ' note' + (infos !== 1 ? 's' : '') + '.';
 
-    var quip = pickQuip(errors, warnings, findings.length);
+    const quip = pickQuip(errors, warnings, findings.length);
     showBubble(quip, errors > 0 ? 'laughing' : 'talking');
     setStatus(errors > 0 ? '🔴' : warnings > 0 ? '🟡' : '🔵', summaryLine);
 
-    var html = '<div class="findings-header">' + escHtml(summaryLine) + '</div>';
-    for (var i = 0; i < findings.length; i++) {
-      var f = findings[i];
-      var icon = f.severity === 'error' ? '🔴' : f.severity === 'warning' ? '🟡' : '🔵';
-      var loc = f.line > 0 ? f.file + ':' + f.line : f.file;
+    let html = '<div class="findings-header-row">' +
+      '<div class="findings-header">' + escHtml(summaryLine) + '</div>' +
+      '<button class="fix-all-btn" id="fix-all-btn">✨ Fix All with Copilot</button>' +
+    '</div>';
+    for (let i = 0; i < findings.length; i++) {
+      const f = findings[i];
+      const icon = f.severity === 'error' ? '🔴' : f.severity === 'warning' ? '🟡' : '🔵';
+      const loc = f.line > 0 ? f.file + ':' + f.line : f.file;
       html +=
-        '<div class="finding ' + escHtml(f.severity) + '" data-file="' + escHtml(f.file) + '" data-line="' + f.line + '">' +
+        '<div class="finding ' + escHtml(f.severity) + '" data-file="' + escHtml(f.file) + '" data-line="' + f.line + '" data-finding-index="' + i + '">' +
           '<div class="finding-header">' + icon + ' <span class="badge ' + escHtml(f.severity) + '">' + escHtml(f.severity) + '</span> ' + escHtml(f.title) + '</div>' +
           '<div class="finding-location">' + escHtml(loc) + '</div>' +
           '<div class="finding-message">' + escHtml(f.message) + '</div>' +
           (f.suggestion ? '<div class="finding-suggestion">💡 ' + escHtml(f.suggestion) + '</div>' : '') +
+          '<button class="fix-btn">✨ Fix with Copilot</button>' +
         '</div>';
     }
     container.innerHTML = html;
+
+    // Navigate to file on finding click (but not on button click)
     container.querySelectorAll('.finding').forEach(function(el) {
-      el.addEventListener('click', function() {
+      el.addEventListener('click', function(e) {
+        if (e.target.classList.contains('fix-btn')) return;
         vscode.postMessage({ type: 'navigate', file: el.dataset.file, line: parseInt(el.dataset.line, 10) });
       });
     });
+
+    // Fix individual finding - look up by index instead of parsing JSON from data attribute
+    container.querySelectorAll('.fix-btn').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        const findingEl = btn.closest('.finding');
+        const index = parseInt(findingEl.dataset.findingIndex, 10);
+        const finding = window.currentFindings[index];
+        if (finding) {
+          vscode.postMessage({ type: 'fixWithCopilot', finding: finding });
+        }
+      });
+    });
+
+    // Fix all findings
+    const fixAllBtn = document.getElementById('fix-all-btn');
+    if (fixAllBtn) {
+      fixAllBtn.addEventListener('click', function() {
+        vscode.postMessage({ type: 'fixAllWithCopilot', findings: window.currentFindings });
+      });
+    }
   }
 
   function pickQuip(errors, warnings, total) {
@@ -738,7 +1051,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   }
 
   window.addEventListener('message', function(event) {
-    var msg = event.data;
+    const msg = event.data;
     if (!msg) return;
     switch (msg.type) {
       case 'message':
@@ -759,20 +1072,25 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         break;
       case 'reviewingState':
         isReviewing = msg.isReviewing;
-        if (startBtn) {
-          startBtn.style.display = msg.isReviewing ? 'none' : 'inline-block';
+        const curStartBtn = document.getElementById('start-btn');
+        const curModelSelect = document.getElementById('model-select');
+        const curReviewerInput = document.getElementById('reviewer-input');
+        const curBranchSelect = document.getElementById('branch-select');
+        const curExtraInstructionsInput = document.getElementById('extra-instructions');
+        if (curStartBtn) {
+          curStartBtn.style.display = msg.isReviewing ? 'none' : 'inline-block';
         }
-        if (modelSelect) {
-          modelSelect.disabled = msg.isReviewing;
+        if (curModelSelect) {
+          curModelSelect.disabled = msg.isReviewing;
         }
-        if (reviewerInput) {
-          reviewerInput.disabled = msg.isReviewing;
+        if (curReviewerInput) {
+          curReviewerInput.disabled = msg.isReviewing;
         }
-        if (branchSelect) {
-          branchSelect.disabled = msg.isReviewing;
+        if (curBranchSelect) {
+          curBranchSelect.disabled = msg.isReviewing;
         }
-        if (extraInstructionsInput) {
-          extraInstructionsInput.disabled = msg.isReviewing;
+        if (curExtraInstructionsInput) {
+          curExtraInstructionsInput.disabled = msg.isReviewing;
         }
         // Start work animation when reviewing starts, go to idle when done
         if (msg.isReviewing) {
@@ -781,18 +1099,19 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
           startAnimation(IDLE_CONFIG, 6);
         }
         break;
-      case 'models':
+      case 'models': {
+        const modelSelect = document.getElementById('model-select');
         if (modelSelect) {
           modelSelect.innerHTML = '';
-          var models = msg.models || [];
+          const models = msg.models || [];
           if (models.length === 0) {
-            var opt = document.createElement('option');
+            const opt = document.createElement('option');
             opt.value = 'copilot-gpt-4o';
             opt.textContent = 'copilot-gpt-4o (default)';
             modelSelect.appendChild(opt);
           } else {
-            for (var i = 0; i < models.length; i++) {
-              var opt = document.createElement('option');
+            for (let i = 0; i < models.length; i++) {
+              const opt = document.createElement('option');
               opt.value = models[i];
               opt.textContent = models[i];
               if (models[i] === msg.currentModel) {
@@ -801,27 +1120,41 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
               modelSelect.appendChild(opt);
             }
           }
+          modelsLoaded = true;
+          applySavedSettings();
         }
         break;
-      case 'branches':
+      }
+      case 'branches': {
+        const branchSelect = document.getElementById('branch-select');
         if (branchSelect) {
           branchSelect.innerHTML = '';
-          var branches = msg.branches || [];
-          var currentBranch = msg.currentBranch || '';
+          const branches = msg.branches || [];
+          const currentBranch = msg.currentBranch || '';
           // Add current branch option first (for uncommitted changes)
-          var currentOpt = document.createElement('option');
+          const currentOpt = document.createElement('option');
           currentOpt.value = currentBranch;
           currentOpt.textContent = currentBranch + ' (uncommitted changes)';
           branchSelect.appendChild(currentOpt);
           // Add other branches
-          for (var i = 0; i < branches.length; i++) {
+          for (let i = 0; i < branches.length; i++) {
             if (branches[i] !== currentBranch) {
-              var opt = document.createElement('option');
+              const opt = document.createElement('option');
               opt.value = branches[i];
               opt.textContent = branches[i];
               branchSelect.appendChild(opt);
             }
           }
+          branchesLoaded = true;
+          applySavedSettings();
+        }
+        break;
+      }
+      case 'savedSettings':
+        if (msg.settings) {
+          savedSettings = msg.settings;
+          settingsLoaded = true;
+          applySavedSettings();
         }
         break;
       case 'reset':
