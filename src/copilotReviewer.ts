@@ -58,6 +58,34 @@ export function getPersonalityMessages(id: string): PersonalityMessages {
 
 const MAX_DIFF_CHARS = 30_000;
 
+/** Canonical list of supported response languages. Kept on the backend so both
+ *  validation and the webview dropdown share the same source of truth. */
+export const SUPPORTED_LANGUAGES: readonly string[] = [
+    'Afrikaans', 'Albanian', 'Arabic', 'Armenian', 'Azerbaijani',
+    'Basque', 'Belarusian', 'Bengali', 'Bosnian', 'Bulgarian',
+    'Catalan', 'Chinese (Simplified)', 'Chinese (Traditional)', 'Croatian', 'Czech',
+    'Danish', 'Dutch', 'English', 'Estonian', 'Finnish',
+    'French', 'Galician', 'Georgian', 'German', 'Greek',
+    'Gujarati', 'Hebrew', 'Hindi', 'Hungarian', 'Icelandic',
+    'Indonesian', 'Irish', 'Italian', 'Japanese', 'Kannada',
+    'Kazakh', 'Korean', 'Latvian', 'Lithuanian', 'Macedonian',
+    'Malay', 'Maltese', 'Marathi', 'Mongolian', 'Nepali',
+    'Norwegian', 'Persian', 'Polish', 'Portuguese (Brazil)', 'Portuguese (Portugal)',
+    'Punjabi', 'Romanian', 'Russian', 'Serbian', 'Slovak',
+    'Slovenian', 'Spanish', 'Swahili', 'Swedish', 'Tamil',
+    'Telugu', 'Thai', 'Turkish', 'Ukrainian', 'Urdu',
+    'Uzbek', 'Vietnamese', 'Welsh',
+];
+
+const SUPPORTED_LANGUAGES_SET = new Set<string>(SUPPORTED_LANGUAGES);
+
+export interface CopilotReviewerOptions {
+    model?: string;
+    personalityId?: string;
+    extraInstructions?: string;
+    language?: string;
+}
+
 /**
  * Uses the VS Code Language Model API to send the diff to GitHub Copilot
  * and parse structured review findings from the response.
@@ -66,14 +94,21 @@ export class CopilotReviewer {
     private readonly personalityId: string;
     private readonly extraInstructions: string;
     private readonly modelId: string;
+    private readonly language: string;
 
-    constructor(modelOverride?: string, personalityIdOverride?: string, extraInstructionsOverride?: string) {
-        this.personalityId = personalityIdOverride || 'sarcastic';
-        this.extraInstructions = extraInstructionsOverride || '';
+    constructor(options: CopilotReviewerOptions = {}) {
+        this.personalityId = options.personalityId || 'sarcastic';
+        this.extraInstructions = options.extraInstructions || '';
         // Default model: 'copilot-gpt-4o'. If this model family is unavailable
         // (e.g., Copilot API changes), review() will fall back to any available
         // Copilot model via selectChatModels({ vendor: 'copilot' }).
-        this.modelId = modelOverride || 'copilot-gpt-4o';
+        this.modelId = options.model || 'copilot-gpt-4o';
+        // Validate language against the allowlist to prevent prompt injection.
+        const requested = options.language || 'English';
+        this.language = SUPPORTED_LANGUAGES_SET.has(requested) ? requested : 'English';
+        if (!SUPPORTED_LANGUAGES_SET.has(requested)) {
+            debugLog(`[Language] Unsupported language '${requested}', falling back to 'English'`);
+        }
     }
 
     async review(diff: string): Promise<ReviewFinding[]> {
@@ -178,8 +213,9 @@ export class CopilotReviewer {
     private buildSystemPrompt(): string {
         const personality = getPersonalityById(this.personalityId);
         const extra = this.extraInstructions ? `\n\nAdditional instructions: ${this.extraInstructions}` : '';
+        const langInstruction = `\n\nIMPORTANT: You must respond in ${this.language}. All finding titles, messages, and suggestions must be written in ${this.language}.`;
 
-        return `${personality.systemPrompt}${extra}
+        return `${personality.systemPrompt}${extra}${langInstruction}
 
 Respond ONLY with a valid JSON array of finding objects. Each object must have these exact keys:
 - "file": string (relative path from repo root, e.g. "src/utils.ts")

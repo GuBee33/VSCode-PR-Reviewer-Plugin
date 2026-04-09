@@ -3,7 +3,7 @@ import * as path from 'path';
 import { execSync } from 'child_process';
 import { ReviewFinding } from './types';
 import { debugLog } from './extension';
-import { getReviewerPersonalities, getPersonalityById, PersonalityMessages } from './copilotReviewer';
+import { getReviewerPersonalities, SUPPORTED_LANGUAGES } from './copilotReviewer';
 
 type CharacterState = 'idle' | 'thinking' | 'talking' | 'laughing';
 
@@ -60,13 +60,21 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             if (msg.type === 'navigate') {
                 this.navigateToFile(msg.file, msg.line);
             } else if (msg.type === 'startReview') {
-                void vscode.commands.executeCommand('prReviewer.reviewPR', msg.model, msg.reviewerStyle, msg.baseBranch, msg.extraInstructions);
+                void vscode.commands.executeCommand('prReviewer.reviewPR', {
+                    model: typeof msg.model === 'string' ? msg.model : undefined,
+                    personalityId: typeof msg.personalityId === 'string' ? msg.personalityId : undefined,
+                    baseBranch: typeof msg.baseBranch === 'string' ? msg.baseBranch : undefined,
+                    extraInstructions: typeof msg.extraInstructions === 'string' ? msg.extraInstructions : undefined,
+                    language: typeof msg.language === 'string' ? msg.language : undefined,
+                });
             } else if (msg.type === 'requestModels') {
                 this.sendAvailableModels();
             } else if (msg.type === 'requestBranches') {
                 this.sendAvailableBranches();
             } else if (msg.type === 'requestPersonalities') {
                 this.sendAvailablePersonalities();
+            } else if (msg.type === 'requestLanguages') {
+                this.sendAvailableLanguages();
             } else if (msg.type === 'saveSettings') {
                 this.saveSettings(msg.settings);
             } else if (msg.type === 'loadSettings') {
@@ -194,7 +202,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     }
 
     /** Save form settings to globalState */
-    private saveSettings(settings: { baseBranch?: string; model?: string; personalityId?: string; extraInstructions?: string }): void {
+    private saveSettings(settings: { baseBranch?: string; model?: string; personalityId?: string; extraInstructions?: string; language?: string }): void {
         const savedKeys: string[] = [];
         const maxLength = 1000; // Reasonable limit for settings values
 
@@ -218,6 +226,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                 .then(undefined, err => debugLog(`[Settings] Failed to save extraInstructions: ${err}`));
             savedKeys.push('extraInstructions');
         }
+        if (settings.language !== undefined && typeof settings.language === 'string' && settings.language.length <= maxLength) {
+            this.context.globalState.update('prReviewer.language', settings.language)
+                .then(undefined, err => debugLog(`[Settings] Failed to save language: ${err}`));
+            savedKeys.push('language');
+        }
         debugLog(`[Settings] Saved keys: ${savedKeys.join(', ')}`);
     }
 
@@ -227,15 +240,21 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         this.postMessage({ type: 'personalities', personalities });
     }
 
+    /** Send supported response languages to the webview */
+    private sendAvailableLanguages(): void {
+        this.postMessage({ type: 'languages', languages: SUPPORTED_LANGUAGES });
+    }
+
     /** Send saved settings to webview */
     private sendSavedSettings(): void {
         const settings = {
             baseBranch: this.context.globalState.get<string>('prReviewer.baseBranch', ''),
             model: this.context.globalState.get<string>('prReviewer.model', ''),
             personalityId: this.context.globalState.get<string>('prReviewer.personalityId', 'sarcastic'),
-            extraInstructions: this.context.globalState.get<string>('prReviewer.extraInstructions', '')
+            extraInstructions: this.context.globalState.get<string>('prReviewer.extraInstructions', ''),
+            language: this.context.globalState.get<string>('prReviewer.language', 'English')
         };
-        debugLog(`[Settings] Loading: baseBranch=${settings.baseBranch ? '[set]' : '[empty]'}, model=${settings.model || '[default]'}, personalityId=${settings.personalityId}`);
+        debugLog(`[Settings] Loading: baseBranch=${settings.baseBranch ? '[set]' : '[empty]'}, model=${settings.model || '[default]'}, personalityId=${settings.personalityId ? '[set]' : '[default]'}, language=${settings.language ? '[set]' : '[default]'}`);
         this.postMessage({ type: 'savedSettings', settings });
     }
 
@@ -742,6 +761,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       </select>
     </div>
     <div class="input-row">
+      <label for="language-select">Response Language</label>
+      <select id="language-select" class="model-dropdown">
+        <option value="">Loading languages...</option>
+      </select>
+    </div>
+    <div class="input-row">
       <label for="extra-instructions">Extra Instructions</label>
       <textarea id="extra-instructions" class="extra-instructions" rows="2" placeholder="e.g. Focus on security issues only..."></textarea>
     </div>
@@ -763,6 +788,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   const personalitySelect = document.getElementById('personality-select');
   const branchSelect = document.getElementById('branch-select');
   const extraInstructionsInput = document.getElementById('extra-instructions');
+  const languageSelect = document.getElementById('language-select');
+
+  // Supported response languages are provided by the backend via requestLanguages/languages.
 
   // Sprite animation config
   const DISP_SIZE = ${dispSize};
@@ -808,10 +836,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   }
 
   // Saved settings (will be populated after load)
-  let savedSettings = { baseBranch: '', model: '', personalityId: 'sarcastic', extraInstructions: '' };
+  let savedSettings = { baseBranch: '', model: '', personalityId: 'sarcastic', extraInstructions: '', language: 'English' };
   let modelsLoaded = false;
   let branchesLoaded = false;
   let personalitiesLoaded = false;
+  let languagesLoaded = false;
   let settingsLoaded = false;
 
   function applySavedSettings() {
@@ -820,6 +849,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     const curModelSelect = document.getElementById('model-select');
     const curPersonalitySelect = document.getElementById('personality-select');
     const curExtraInstructionsInput = document.getElementById('extra-instructions');
+    const curLanguageSelect = document.getElementById('language-select');
     if (branchesLoaded && savedSettings.baseBranch && curBranchSelect) {
       for (let i = 0; i < curBranchSelect.options.length; i++) {
         if (curBranchSelect.options[i].value === savedSettings.baseBranch) {
@@ -853,10 +883,13 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     if (savedSettings.extraInstructions && curExtraInstructionsInput) {
       curExtraInstructionsInput.value = savedSettings.extraInstructions;
     }
+    if (savedSettings.language && curLanguageSelect && languagesLoaded) {
+      curLanguageSelect.value = savedSettings.language;
+    }
   }
 
   // Reusable function to attach persistence handlers to form elements
-  function attachPersistenceHandlers(branchEl, modelEl, personalityEl, extraInstructionsEl) {
+  function attachPersistenceHandlers(branchEl, modelEl, personalityEl, extraInstructionsEl, languageEl) {
     if (branchEl) {
       branchEl.addEventListener('change', function() {
         vscode.postMessage({ type: 'saveSettings', settings: { baseBranch: branchEl.value } });
@@ -883,16 +916,22 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         vscode.postMessage({ type: 'saveSettings', settings: { extraInstructions: extraInstructionsEl.value } });
       });
     }
+    if (languageEl) {
+      languageEl.addEventListener('change', function() {
+        vscode.postMessage({ type: 'saveSettings', settings: { language: languageEl.value } });
+      });
+    }
   }
 
-  // Request available models, branches, personalities and saved settings on load
+  // Request available models, branches, personalities, languages and saved settings on load
   vscode.postMessage({ type: 'requestModels' });
   vscode.postMessage({ type: 'requestBranches' });
   vscode.postMessage({ type: 'requestPersonalities' });
+  vscode.postMessage({ type: 'requestLanguages' });
   vscode.postMessage({ type: 'loadSettings' });
 
   // Save settings when values change (using reusable function)
-  attachPersistenceHandlers(branchSelect, modelSelect, personalitySelect, extraInstructionsInput);
+  attachPersistenceHandlers(branchSelect, modelSelect, personalitySelect, extraInstructionsInput, languageSelect);
 
   if (startBtn) {
     startBtn.addEventListener('click', function() {
@@ -900,7 +939,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       const personalityId = personalitySelect ? personalitySelect.value : 'sarcastic';
       const baseBranch = branchSelect ? branchSelect.value : '';
       const extraInstructions = extraInstructionsInput ? extraInstructionsInput.value : '';
-      vscode.postMessage({ type: 'startReview', model: selectedModel, personalityId: personalityId, baseBranch: baseBranch, extraInstructions: extraInstructions });
+      const language = languageSelect ? languageSelect.value : 'English';
+      vscode.postMessage({ type: 'startReview', model: selectedModel, personalityId: personalityId, baseBranch: baseBranch, extraInstructions: extraInstructions, language: language });
     });
   }
 
@@ -964,6 +1004,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         '</select>' +
       '</div>' +
       '<div class="input-row">' +
+        '<label for="language-select">Response Language</label>' +
+        '<select id="language-select" class="model-dropdown">' +
+          '<option value="">Loading languages...</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="input-row">' +
         '<label for="extra-instructions">Extra Instructions</label>' +
         '<textarea id="extra-instructions" class="extra-instructions" rows="3" placeholder="e.g. Focus on security issues, ignore style..."></textarea>' +
       '</div>' +
@@ -978,16 +1024,18 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     const newPersonalitySelect = document.getElementById('personality-select');
     const newBranchSelect = document.getElementById('branch-select');
     const newExtraInstructionsInput = document.getElementById('extra-instructions');
+    const newLanguageSelect = document.getElementById('language-select');
     if (newStartBtn) {
       newStartBtn.addEventListener('click', function() {
         const selectedModel = newModelSelect ? newModelSelect.value : '';
         const personalityId = newPersonalitySelect ? newPersonalitySelect.value : 'sarcastic';
         const baseBranch = newBranchSelect ? newBranchSelect.value : '';
         const extraInstructions = newExtraInstructionsInput ? newExtraInstructionsInput.value : '';
-        vscode.postMessage({ type: 'startReview', model: selectedModel, personalityId: personalityId, baseBranch: baseBranch, extraInstructions: extraInstructions });
+        const language = newLanguageSelect ? newLanguageSelect.value : 'English';
+        vscode.postMessage({ type: 'startReview', model: selectedModel, personalityId: personalityId, baseBranch: baseBranch, extraInstructions: extraInstructions, language: language });
       });
     }
-    attachPersistenceHandlers(newBranchSelect, newModelSelect, newPersonalitySelect, newExtraInstructionsInput);
+    attachPersistenceHandlers(newBranchSelect, newModelSelect, newPersonalitySelect, newExtraInstructionsInput, newLanguageSelect);
   }
 
   function resetToInitialState() {
@@ -1009,10 +1057,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     modelsLoaded = false;
     branchesLoaded = false;
     personalitiesLoaded = false;
+    languagesLoaded = false;
     settingsLoaded = false;
     vscode.postMessage({ type: 'requestModels' });
     vscode.postMessage({ type: 'requestBranches' });
     vscode.postMessage({ type: 'requestPersonalities' });
+    vscode.postMessage({ type: 'requestLanguages' });
     vscode.postMessage({ type: 'loadSettings' });
   }
 
@@ -1148,6 +1198,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         if (curExtraInstructionsInput) {
           curExtraInstructionsInput.disabled = msg.isReviewing;
         }
+        const curLanguageSelect = document.getElementById('language-select');
+        if (curLanguageSelect) {
+          curLanguageSelect.disabled = msg.isReviewing;
+        }
         // Start work animation when reviewing starts, go to idle when done
         if (msg.isReviewing) {
           startAnimation(WORK_CONFIG, 10);
@@ -1225,6 +1279,24 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             updateIdleBubble();
           }
           personalitiesLoaded = true;
+          applySavedSettings();
+        }
+        break;
+      }
+      case 'languages': {
+        const langSelect = document.getElementById('language-select');
+        if (langSelect) {
+          langSelect.innerHTML = '';
+          const languages = msg.languages || [];
+          for (let i = 0; i < languages.length; i++) {
+            const opt = document.createElement('option');
+            opt.value = languages[i];
+            opt.textContent = languages[i];
+            langSelect.appendChild(opt);
+          }
+          // Default to English if no saved setting yet
+          langSelect.value = savedSettings.language || 'English';
+          languagesLoaded = true;
           applySavedSettings();
         }
         break;

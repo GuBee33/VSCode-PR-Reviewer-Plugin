@@ -11,6 +11,7 @@ export interface ReviewOptions {
     personalityId?: string;
     baseBranch?: string;
     extraInstructions?: string;
+    language?: string;
 }
 
 let decorator: CodeDecorator | undefined;
@@ -93,7 +94,8 @@ export function activate(context: vscode.ExtensionContext): void {
             model: typeof opts.model === 'string' ? opts.model : undefined,
             personalityId: typeof opts.personalityId === 'string' ? opts.personalityId : undefined,
             baseBranch: typeof opts.baseBranch === 'string' ? opts.baseBranch : undefined,
-            extraInstructions: typeof opts.extraInstructions === 'string' ? opts.extraInstructions : undefined
+            extraInstructions: typeof opts.extraInstructions === 'string' ? opts.extraInstructions : undefined,
+            language: typeof opts.language === 'string' ? opts.language : undefined
         };
         
         sidebarProvider.reveal();
@@ -171,7 +173,7 @@ async function runReview(
     statusBar: StatusBarCharacter,
     options: ReviewOptions = {}
 ): Promise<void> {
-    const { model: modelOverride, personalityId: personalityIdOverride, baseBranch: baseBranchOverride, extraInstructions: extraInstructionsOverride } = options;
+    const { model: modelOverride, personalityId: personalityIdOverride, baseBranch: baseBranchOverride, extraInstructions: extraInstructionsOverride, language: languageOverride } = options;
     
     // Get personality-specific messages (with fallback for error handling)
     let messages: import('./copilotReviewer').PersonalityMessages | undefined;
@@ -211,7 +213,7 @@ async function runReview(
         sidebar.showMessage(messages?.reviewing ?? '🤔 Reviewing code…', 'thinking');
         sidebar.appendLog('🤖 Sending diff to Copilot for review…');
         statusBar.setState('thinking', `Reviewing ${diffLines} lines…`);
-        const reviewer = new CopilotReviewer(modelOverride, personalityIdOverride, extraInstructionsOverride);
+        const reviewer = new CopilotReviewer({ model: modelOverride, personalityId: personalityIdOverride, extraInstructions: extraInstructionsOverride, language: languageOverride });
         const findings = await reviewer.review(diff);
 
         if (!findings || findings.length === 0) {
