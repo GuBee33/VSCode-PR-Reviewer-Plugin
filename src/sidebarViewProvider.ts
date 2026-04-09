@@ -3,6 +3,7 @@ import * as path from 'path';
 import { execSync } from 'child_process';
 import { ReviewFinding } from './types';
 import { debugLog } from './extension';
+import { getReviewerPersonalities, getPersonalityById, PersonalityMessages } from './copilotReviewer';
 
 type CharacterState = 'idle' | 'thinking' | 'talking' | 'laughing';
 
@@ -64,6 +65,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                 this.sendAvailableModels();
             } else if (msg.type === 'requestBranches') {
                 this.sendAvailableBranches();
+            } else if (msg.type === 'requestPersonalities') {
+                this.sendAvailablePersonalities();
             } else if (msg.type === 'saveSettings') {
                 this.saveSettings(msg.settings);
             } else if (msg.type === 'loadSettings') {
@@ -191,7 +194,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     }
 
     /** Save form settings to globalState */
-    private saveSettings(settings: { baseBranch?: string; model?: string; reviewerStyle?: string; extraInstructions?: string }): void {
+    private saveSettings(settings: { baseBranch?: string; model?: string; personalityId?: string; extraInstructions?: string }): void {
         const savedKeys: string[] = [];
         const maxLength = 1000; // Reasonable limit for settings values
 
@@ -205,10 +208,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                 .then(undefined, err => debugLog(`[Settings] Failed to save model: ${err}`));
             savedKeys.push('model');
         }
-        if (settings.reviewerStyle !== undefined && typeof settings.reviewerStyle === 'string' && settings.reviewerStyle.length <= maxLength) {
-            this.context.globalState.update('prReviewer.reviewerStyle', settings.reviewerStyle)
-                .then(undefined, err => debugLog(`[Settings] Failed to save reviewerStyle: ${err}`));
-            savedKeys.push('reviewerStyle');
+        if (settings.personalityId !== undefined && typeof settings.personalityId === 'string' && settings.personalityId.length <= maxLength) {
+            this.context.globalState.update('prReviewer.personalityId', settings.personalityId)
+                .then(undefined, err => debugLog(`[Settings] Failed to save personalityId: ${err}`));
+            savedKeys.push('personalityId');
         }
         if (settings.extraInstructions !== undefined && typeof settings.extraInstructions === 'string' && settings.extraInstructions.length <= maxLength) {
             this.context.globalState.update('prReviewer.extraInstructions', settings.extraInstructions)
@@ -218,15 +221,21 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         debugLog(`[Settings] Saved keys: ${savedKeys.join(', ')}`);
     }
 
+    /** Send available reviewer personalities to the webview */
+    private sendAvailablePersonalities(): void {
+        const personalities = getReviewerPersonalities();
+        this.postMessage({ type: 'personalities', personalities });
+    }
+
     /** Send saved settings to webview */
     private sendSavedSettings(): void {
         const settings = {
             baseBranch: this.context.globalState.get<string>('prReviewer.baseBranch', ''),
             model: this.context.globalState.get<string>('prReviewer.model', ''),
-            reviewerStyle: this.context.globalState.get<string>('prReviewer.reviewerStyle', 'Ricky Gervais'),
+            personalityId: this.context.globalState.get<string>('prReviewer.personalityId', 'sarcastic'),
             extraInstructions: this.context.globalState.get<string>('prReviewer.extraInstructions', '')
         };
-        debugLog(`[Settings] Loading: baseBranch=${settings.baseBranch ? '[set]' : '[empty]'}, model=${settings.model || '[default]'}, reviewerStyle=${settings.reviewerStyle}`);
+        debugLog(`[Settings] Loading: baseBranch=${settings.baseBranch ? '[set]' : '[empty]'}, model=${settings.model || '[default]'}, personalityId=${settings.personalityId}`);
         this.postMessage({ type: 'savedSettings', settings });
     }
 
@@ -727,8 +736,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       </select>
     </div>
     <div class="input-row">
-      <label for="reviewer-input">Reviewer Style</label>
-      <input type="text" id="reviewer-input" class="reviewer-input" value="Ricky Gervais" placeholder="e.g. Gordon Ramsay, a disappointed professor...">
+      <label for="personality-select">Reviewer Personality</label>
+      <select id="personality-select" class="model-dropdown">
+        <option value="">Loading personalities...</option>
+      </select>
     </div>
     <div class="input-row">
       <label for="extra-instructions">Extra Instructions</label>
@@ -749,7 +760,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   const statusText = document.getElementById('status-text');
   const startBtn = document.getElementById('start-btn');
   const modelSelect = document.getElementById('model-select');
-  const reviewerInput = document.getElementById('reviewer-input');
+  const personalitySelect = document.getElementById('personality-select');
   const branchSelect = document.getElementById('branch-select');
   const extraInstructionsInput = document.getElementById('extra-instructions');
 
@@ -785,17 +796,29 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 
   let talkTimer = null;
 
+  // Personalities and messages storage
+  let allPersonalities = [];
+  let currentMessages = null;
+
+  // Updates bubble to show current personality's idle message
+  function updateIdleBubble() {
+    if (currentMessages && !isReviewing) {
+      bubble.textContent = currentMessages.idle;
+    }
+  }
+
   // Saved settings (will be populated after load)
-  let savedSettings = { baseBranch: '', model: '', reviewerStyle: 'Ricky Gervais', extraInstructions: '' };
+  let savedSettings = { baseBranch: '', model: '', personalityId: 'sarcastic', extraInstructions: '' };
   let modelsLoaded = false;
   let branchesLoaded = false;
+  let personalitiesLoaded = false;
   let settingsLoaded = false;
 
   function applySavedSettings() {
     if (!settingsLoaded) return;
     const curBranchSelect = document.getElementById('branch-select');
     const curModelSelect = document.getElementById('model-select');
-    const curReviewerInput = document.getElementById('reviewer-input');
+    const curPersonalitySelect = document.getElementById('personality-select');
     const curExtraInstructionsInput = document.getElementById('extra-instructions');
     if (branchesLoaded && savedSettings.baseBranch && curBranchSelect) {
       for (let i = 0; i < curBranchSelect.options.length; i++) {
@@ -813,8 +836,19 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         }
       }
     }
-    if (savedSettings.reviewerStyle && curReviewerInput) {
-      curReviewerInput.value = savedSettings.reviewerStyle;
+    if (personalitiesLoaded && savedSettings.personalityId && curPersonalitySelect) {
+      for (let i = 0; i < curPersonalitySelect.options.length; i++) {
+        if (curPersonalitySelect.options[i].value === savedSettings.personalityId) {
+          curPersonalitySelect.selectedIndex = i;
+          // Update current messages based on selected personality
+          const selectedPersonality = allPersonalities.find(function(p) { return p.id === savedSettings.personalityId; });
+          if (selectedPersonality && selectedPersonality.messages) {
+            currentMessages = selectedPersonality.messages;
+            updateIdleBubble();
+          }
+          break;
+        }
+      }
     }
     if (savedSettings.extraInstructions && curExtraInstructionsInput) {
       curExtraInstructionsInput.value = savedSettings.extraInstructions;
@@ -822,7 +856,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   }
 
   // Reusable function to attach persistence handlers to form elements
-  function attachPersistenceHandlers(branchEl, modelEl, reviewerEl, extraInstructionsEl) {
+  function attachPersistenceHandlers(branchEl, modelEl, personalityEl, extraInstructionsEl) {
     if (branchEl) {
       branchEl.addEventListener('change', function() {
         vscode.postMessage({ type: 'saveSettings', settings: { baseBranch: branchEl.value } });
@@ -833,9 +867,15 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         vscode.postMessage({ type: 'saveSettings', settings: { model: modelEl.value } });
       });
     }
-    if (reviewerEl) {
-      reviewerEl.addEventListener('change', function() {
-        vscode.postMessage({ type: 'saveSettings', settings: { reviewerStyle: reviewerEl.value } });
+    if (personalityEl) {
+      personalityEl.addEventListener('change', function() {
+        vscode.postMessage({ type: 'saveSettings', settings: { personalityId: personalityEl.value } });
+        // Update current messages based on selected personality
+        const selectedPersonality = allPersonalities.find(function(p) { return p.id === personalityEl.value; });
+        if (selectedPersonality && selectedPersonality.messages) {
+          currentMessages = selectedPersonality.messages;
+          updateIdleBubble();
+        }
       });
     }
     if (extraInstructionsEl) {
@@ -845,21 +885,22 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  // Request available models, branches, and saved settings on load
+  // Request available models, branches, personalities and saved settings on load
   vscode.postMessage({ type: 'requestModels' });
   vscode.postMessage({ type: 'requestBranches' });
+  vscode.postMessage({ type: 'requestPersonalities' });
   vscode.postMessage({ type: 'loadSettings' });
 
   // Save settings when values change (using reusable function)
-  attachPersistenceHandlers(branchSelect, modelSelect, reviewerInput, extraInstructionsInput);
+  attachPersistenceHandlers(branchSelect, modelSelect, personalitySelect, extraInstructionsInput);
 
   if (startBtn) {
     startBtn.addEventListener('click', function() {
       const selectedModel = modelSelect ? modelSelect.value : '';
-      const reviewerStyle = reviewerInput ? reviewerInput.value : 'Ricky Gervais';
+      const personalityId = personalitySelect ? personalitySelect.value : 'sarcastic';
       const baseBranch = branchSelect ? branchSelect.value : '';
       const extraInstructions = extraInstructionsInput ? extraInstructionsInput.value : '';
-      vscode.postMessage({ type: 'startReview', model: selectedModel, reviewerStyle: reviewerStyle, baseBranch: baseBranch, extraInstructions: extraInstructions });
+      vscode.postMessage({ type: 'startReview', model: selectedModel, personalityId: personalityId, baseBranch: baseBranch, extraInstructions: extraInstructions });
     });
   }
 
@@ -901,19 +942,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 
   function clearLog() { logEl.innerHTML = ''; }
 
-  function resetToInitialState() {
-    // Reset reviewing state
-    isReviewing = false;
-    // Clear log
-    logEl.innerHTML = '';
-    // Reset status
-    setStatus('💤', 'Idle — waiting for review');
-    // Reset bubble
-    bubble.textContent = 'Ready to eviscerate some code…';
-    // Reset animation
-    startAnimation(IDLE_CONFIG, 6);
-    // Restore initial empty state with form
-    container.innerHTML = '<div class="empty-state">' +
+  // Shared form HTML template to avoid duplication
+  function getFormHtml() {
+    return '<div class="empty-state">' +
       '<div class="input-row">' +
         '<label for="branch-select">Compare Against</label>' +
         '<select id="branch-select" class="model-dropdown">' +
@@ -927,8 +958,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         '</select>' +
       '</div>' +
       '<div class="input-row">' +
-        '<label for="reviewer-input">Reviewer Style</label>' +
-        '<input type="text" id="reviewer-input" class="reviewer-input" value="Ricky Gervais" placeholder="e.g. Gordon Ramsay, a disappointed professor...">' +
+        '<label for="personality-select">Reviewer Personality</label>' +
+        '<select id="personality-select" class="model-dropdown">' +
+          '<option value="">Loading personalities...</option>' +
+        '</select>' +
       '</div>' +
       '<div class="input-row">' +
         '<label for="extra-instructions">Extra Instructions</label>' +
@@ -936,36 +969,58 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       '</div>' +
       '<button class="review-btn" id="start-btn">Start Review</button>' +
     '</div>';
-    // Re-bind elements and events
+  }
+
+  // Binds event handlers to form elements after DOM insertion
+  function bindFormHandlers() {
     const newStartBtn = document.getElementById('start-btn');
     const newModelSelect = document.getElementById('model-select');
-    const newReviewerInput = document.getElementById('reviewer-input');
+    const newPersonalitySelect = document.getElementById('personality-select');
     const newBranchSelect = document.getElementById('branch-select');
     const newExtraInstructionsInput = document.getElementById('extra-instructions');
     if (newStartBtn) {
       newStartBtn.addEventListener('click', function() {
         const selectedModel = newModelSelect ? newModelSelect.value : '';
-        const reviewerStyle = newReviewerInput ? newReviewerInput.value : 'Ricky Gervais';
+        const personalityId = newPersonalitySelect ? newPersonalitySelect.value : 'sarcastic';
         const baseBranch = newBranchSelect ? newBranchSelect.value : '';
         const extraInstructions = newExtraInstructionsInput ? newExtraInstructionsInput.value : '';
-        vscode.postMessage({ type: 'startReview', model: selectedModel, reviewerStyle: reviewerStyle, baseBranch: baseBranch, extraInstructions: extraInstructions });
+        vscode.postMessage({ type: 'startReview', model: selectedModel, personalityId: personalityId, baseBranch: baseBranch, extraInstructions: extraInstructions });
       });
     }
-    // Add change handlers for persistence (using reusable function)
-    attachPersistenceHandlers(newBranchSelect, newModelSelect, newReviewerInput, newExtraInstructionsInput);
+    attachPersistenceHandlers(newBranchSelect, newModelSelect, newPersonalitySelect, newExtraInstructionsInput);
+  }
+
+  function resetToInitialState() {
+    // Reset reviewing state
+    isReviewing = false;
+    // Clear log
+    logEl.innerHTML = '';
+    // Reset status
+    setStatus('💤', 'Idle — waiting for review');
+    // Reset bubble (will be updated when personalities load)
+    bubble.textContent = currentMessages ? currentMessages.idle : 'Ready to eviscerate some code…';
+    // Reset animation
+    startAnimation(IDLE_CONFIG, 6);
+    // Restore initial empty state with form using shared template
+    container.innerHTML = getFormHtml();
+    // Bind event handlers
+    bindFormHandlers();
     // Reset loaded flags and request fresh data
     modelsLoaded = false;
     branchesLoaded = false;
+    personalitiesLoaded = false;
     settingsLoaded = false;
     vscode.postMessage({ type: 'requestModels' });
     vscode.postMessage({ type: 'requestBranches' });
+    vscode.postMessage({ type: 'requestPersonalities' });
     vscode.postMessage({ type: 'loadSettings' });
   }
 
   function renderFindings(findings) {
     if (!findings || findings.length === 0) {
-      container.innerHTML = '<div class="empty-state">No findings. Either your code is decent, or I\\'ve gone blind.</div>';
-      showBubble('Right, not as bad as I thought. Damning with faint praise, that.', 'idle');
+      const noIssuesMsg = currentMessages ? currentMessages.quips.noIssues : 'No findings. Either your code is decent, or I\\'ve gone blind.';
+      container.innerHTML = '<div class="empty-state">' + escHtml(noIssuesMsg) + '</div>';
+      showBubble(noIssuesMsg, 'idle');
       setStatus('✅', 'Review complete — no issues');
       return;
     }
@@ -1036,13 +1091,14 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   }
 
   function pickQuip(errors, warnings, total) {
-    if (errors > 5)  return "Oh my god. This isn't code, it's a hate crime against computers.";
-    if (errors > 2)  return "I've seen better code written by a drunk toddler.";
-    if (errors > 0)  return "There are errors in here. Real ones. Not just the ones in your life choices.";
-    if (warnings > 3) return "No disasters, but the warnings tell a story. A sad one.";
-    if (warnings > 0) return "Could be worse. Could be better. Mostly just… there.";
-    if (total === 0)  return "I can't find anything. Either it's fine or you've broken my scanner.";
-    return "A few things to note. Do take it personally.";
+    const q = currentMessages ? currentMessages.quips : null;
+    if (errors > 5)  return q ? q.manyErrors : "Oh my god. This isn't code, it's a hate crime against computers.";
+    if (errors > 2)  return q ? q.someErrors : "I've seen better code written by a drunk toddler.";
+    if (errors > 0)  return q ? q.fewErrors : "There are errors in here. Real ones. Not just the ones in your life choices.";
+    if (warnings > 3) return q ? q.manyWarnings : "No disasters, but the warnings tell a story. A sad one.";
+    if (warnings > 0) return q ? q.someWarnings : "Could be worse. Could be better. Mostly just… there.";
+    if (total === 0)  return q ? q.noIssues : "I can't find anything. Either it's fine or you've broken my scanner.";
+    return q ? q.default : "A few things to note. Do take it personally.";
   }
 
   function escHtml(s) {
@@ -1074,7 +1130,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         isReviewing = msg.isReviewing;
         const curStartBtn = document.getElementById('start-btn');
         const curModelSelect = document.getElementById('model-select');
-        const curReviewerInput = document.getElementById('reviewer-input');
+        const curPersonalitySelect = document.getElementById('personality-select');
         const curBranchSelect = document.getElementById('branch-select');
         const curExtraInstructionsInput = document.getElementById('extra-instructions');
         if (curStartBtn) {
@@ -1083,8 +1139,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         if (curModelSelect) {
           curModelSelect.disabled = msg.isReviewing;
         }
-        if (curReviewerInput) {
-          curReviewerInput.disabled = msg.isReviewing;
+        if (curPersonalitySelect) {
+          curPersonalitySelect.disabled = msg.isReviewing;
         }
         if (curBranchSelect) {
           curBranchSelect.disabled = msg.isReviewing;
@@ -1146,6 +1202,29 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             }
           }
           branchesLoaded = true;
+          applySavedSettings();
+        }
+        break;
+      }
+      case 'personalities': {
+        const personalitySelect = document.getElementById('personality-select');
+        if (personalitySelect) {
+          personalitySelect.innerHTML = '';
+          const personalities = msg.personalities || [];
+          allPersonalities = personalities;
+          for (let i = 0; i < personalities.length; i++) {
+            const opt = document.createElement('option');
+            opt.value = personalities[i].id;
+            opt.textContent = personalities[i].name;
+            opt.title = personalities[i].description;
+            personalitySelect.appendChild(opt);
+          }
+          // Set default messages from first personality (sarcastic)
+          if (personalities.length > 0 && personalities[0].messages) {
+            currentMessages = personalities[0].messages;
+            updateIdleBubble();
+          }
+          personalitiesLoaded = true;
           applySavedSettings();
         }
         break;

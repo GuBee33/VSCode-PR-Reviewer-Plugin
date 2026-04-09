@@ -2,13 +2,13 @@ import * as vscode from 'vscode';
 import { SidebarViewProvider } from './sidebarViewProvider';
 import { StatusBarCharacter } from './statusBarCharacter';
 import { PrDiffFetcher } from './prDiffFetcher';
-import { CopilotReviewer } from './copilotReviewer';
+import { CopilotReviewer, getPersonalityMessages } from './copilotReviewer';
 import { CodeDecorator } from './codeDecorator';
 
 /** Options for the reviewPR command */
 export interface ReviewOptions {
     model?: string;
-    reviewerStyle?: string;
+    personalityId?: string;
     baseBranch?: string;
     extraInstructions?: string;
 }
@@ -70,19 +70,19 @@ export function activate(context: vscode.ExtensionContext): void {
     // The webview posts { type: 'startReview' } which triggers the command
     // This is handled inside SidebarViewProvider via onDidReceiveMessage
 
-    const reviewCmd = vscode.commands.registerCommand('prReviewer.reviewPR', async (options?: ReviewOptions | string, reviewerStyle?: string, baseBranch?: string, extraInstructions?: string) => {
+    const reviewCmd = vscode.commands.registerCommand('prReviewer.reviewPR', async (options?: ReviewOptions | string, personalityId?: string, baseBranch?: string, extraInstructions?: string) => {
         // Support both new options object API and legacy positional parameters
         let opts: ReviewOptions;
         if (typeof options === 'object' && options !== null) {
             opts = options;
         } else {
             // Legacy positional API (deprecated)
-            if (options !== undefined || reviewerStyle !== undefined || baseBranch !== undefined || extraInstructions !== undefined) {
-                debugLog('[Deprecated] Using legacy positional API for reviewPR command. Use { model, reviewerStyle, baseBranch, extraInstructions } object instead.');
+            if (options !== undefined || personalityId !== undefined || baseBranch !== undefined || extraInstructions !== undefined) {
+                debugLog('[Deprecated] Using legacy positional API for reviewPR command. Use { model, personalityId, baseBranch, extraInstructions } object instead.');
             }
             opts = {
                 model: typeof options === 'string' ? options : undefined,
-                reviewerStyle: typeof reviewerStyle === 'string' ? reviewerStyle : undefined,
+                personalityId: typeof personalityId === 'string' ? personalityId : undefined,
                 baseBranch: typeof baseBranch === 'string' ? baseBranch : undefined,
                 extraInstructions: typeof extraInstructions === 'string' ? extraInstructions : undefined
             };
@@ -91,7 +91,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // Runtime validation for opts fields (commands can pass arbitrary args)
         const validatedOpts: ReviewOptions = {
             model: typeof opts.model === 'string' ? opts.model : undefined,
-            reviewerStyle: typeof opts.reviewerStyle === 'string' ? opts.reviewerStyle : undefined,
+            personalityId: typeof opts.personalityId === 'string' ? opts.personalityId : undefined,
             baseBranch: typeof opts.baseBranch === 'string' ? opts.baseBranch : undefined,
             extraInstructions: typeof opts.extraInstructions === 'string' ? opts.extraInstructions : undefined
         };
@@ -171,27 +171,34 @@ async function runReview(
     statusBar: StatusBarCharacter,
     options: ReviewOptions = {}
 ): Promise<void> {
-    const { model: modelOverride, reviewerStyle: reviewerStyleOverride, baseBranch: baseBranchOverride, extraInstructions: extraInstructionsOverride } = options;
+    const { model: modelOverride, personalityId: personalityIdOverride, baseBranch: baseBranchOverride, extraInstructions: extraInstructionsOverride } = options;
+    
+    // Get personality-specific messages (with fallback for error handling)
+    let messages: import('./copilotReviewer').PersonalityMessages | undefined;
+    try {
+        messages = getPersonalityMessages(personalityIdOverride || 'sarcastic');
+    } catch (personalityError) {
+        debugLog(`[Personality] Failed to load personality: ${personalityError}`);
+        // Fall through - messages will be undefined and we'll use fallback strings
+    }
+    
     try {
         sidebar.setReviewingState(true);
         sidebar.clearLog();
         sidebar.appendLog('🚀 Review started');
-        sidebar.showMessage('🎬 Alright, let\'s see what catastrophe you\'ve cooked up this time…', 'thinking');
+        sidebar.showMessage(messages?.reviewStart ?? '🎬 Starting review…', 'thinking');
         statusBar.setState('thinking', 'Starting review…');
 
         // 1. Fetch the diff
         const fetcher = new PrDiffFetcher(baseBranchOverride);
-        sidebar.showMessage('📂 Fetching your so-called "changes"…', 'thinking');
+        sidebar.showMessage(messages?.fetchingDiff ?? '📂 Fetching changes…', 'thinking');
         sidebar.appendLog('📂 Fetching diff from git…');
         statusBar.setState('thinking', 'Fetching diff…');
         const diff = await fetcher.getDiff();
 
         if (!diff || diff.trim().length === 0) {
             sidebar.appendLog('⚠️  No diff found — nothing to review', true);
-            sidebar.showMessage(
-                '…Nothing. You changed absolutely nothing. Brilliant. A masterpiece of inaction.',
-                'idle'
-            );
+            sidebar.showMessage(messages?.noDiff ?? 'No changes found to review.', 'idle');
             statusBar.setState('done', 'Nothing to review');
             sidebar.setReviewingState(false);
             return;
@@ -201,18 +208,15 @@ async function runReview(
         sidebar.appendLog(`✅ Diff fetched — ${diffLines} line${diffLines !== 1 ? 's' : ''} changed`);
 
         // 2. Send to Copilot
-        sidebar.showMessage('🤔 Reading this… utter disaster…', 'thinking');
+        sidebar.showMessage(messages?.reviewing ?? '🤔 Reviewing code…', 'thinking');
         sidebar.appendLog('🤖 Sending diff to Copilot for review…');
         statusBar.setState('thinking', `Reviewing ${diffLines} lines…`);
-        const reviewer = new CopilotReviewer(modelOverride, reviewerStyleOverride, extraInstructionsOverride);
+        const reviewer = new CopilotReviewer(modelOverride, personalityIdOverride, extraInstructionsOverride);
         const findings = await reviewer.review(diff);
 
         if (!findings || findings.length === 0) {
             sidebar.appendLog('✅ Review complete — no findings');
-            sidebar.showMessage(
-                'Even I can\'t find anything wrong. Which either means you\'ve done well, or my standards have finally hit rock bottom.',
-                'idle'
-            );
+            sidebar.showMessage(messages?.noFindings ?? 'No issues found!', 'idle');
             statusBar.setState('done', 'No issues found');
             sidebar.setReviewingState(false);
             return;
@@ -242,7 +246,8 @@ async function runReview(
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         sidebar.appendLog(`❌ Error: ${msg}`, true);
-        sidebar.showMessage(`Oh brilliant. An error. "${msg}". Just what I needed.`, 'idle');
+        const errorMessage = messages?.error?.replace('{error}', msg) ?? `An error occurred: ${msg}`;
+        sidebar.showMessage(errorMessage, 'idle');
         statusBar.setState('error', `Error: ${msg}`);
         vscode.window.showErrorMessage(`PR Reviewer error: ${msg}`);
         sidebar.setReviewingState(false);

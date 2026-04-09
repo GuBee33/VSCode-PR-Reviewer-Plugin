@@ -1,8 +1,8 @@
 {
   "name": "pr-reviewer",
   "displayName": "PR Reviewer – Copilot Edition",
-  "description": "Review pull requests with GitHub Copilot, narrated by an animated cartoon character in the style of Ricky Gervais.",
-  "version": "0.1.0",
+  "description": "Review pull requests / code changes with GitHub Copilot, narrated by an animated cartoon character.",
+  "version": "1.0.0",
   "publisher": "GuBee33",
   "repository": {
     "type": "git",
@@ -22,6 +22,7 @@
   ],
   "activationEvents": [],
   "main": "./out/extension.js",
+  "icon": "icon.png",
   "contributes": {
     "commands": [
       {
