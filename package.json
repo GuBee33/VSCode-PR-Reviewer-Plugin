@@ -2,8 +2,8 @@
   "name": "pr-reviewer",
   "displayName": "PR Reviewer – Copilot Edition",
   "description": "Review pull requests / code changes with GitHub Copilot, narrated by an animated cartoon character.",
-  "version": "1.0.0",
-  "publisher": "GuBee33",
+  "version": "1.1.0",
+  "publisher": "gubee",
   "repository": {
     "type": "git",
     "url": "https://github.com/GuBee33/VSCode-PR-Reviewer-Plugin"
