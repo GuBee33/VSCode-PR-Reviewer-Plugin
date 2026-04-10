@@ -86,16 +86,18 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             }
         });
 
-        // Watch for sprite config changes and reload webview
+        // Watch for config changes that require webview reload
         this.configWatcher = vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration('prReviewer.customIdleSprite') || 
                 e.affectsConfiguration('prReviewer.customWorkSprite') ||
                 e.affectsConfiguration('prReviewer.idleSpriteRows') ||
                 e.affectsConfiguration('prReviewer.idleSpriteCols') ||
                 e.affectsConfiguration('prReviewer.workSpriteRows') ||
-                e.affectsConfiguration('prReviewer.workSpriteCols')) {
-                debugLog('[Webview] Sprite config changed, reloading webview...');
-                // Update localResourceRoots with new sprite directories
+                e.affectsConfiguration('prReviewer.workSpriteCols') ||
+                e.affectsConfiguration('prReviewer.fontSize') ||
+                e.affectsConfiguration('prReviewer.fontFamily')) {
+                debugLog('[Webview] Configuration changed, reloading webview...');
+                // Update localResourceRoots (needed for custom sprites)
                 this.updateWebviewOptions(webviewView);
                 // Rebuild HTML with new sprite
                 this.isHtmlReady = false;
@@ -530,6 +532,33 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             || this.getSpriteUri(webview, 'GuBee-walk.png');
         const nonce   = getNonce();
 
+        // Font settings with validation
+        const rawFontSize = config.get<number>('fontSize', 0);
+        // Use 0 as sentinel for "use VS Code default"; otherwise clamp to valid range
+        const fontSize = rawFontSize > 0 
+            ? Math.max(8, Math.min(32, Number.isFinite(rawFontSize) ? rawFontSize : 0))
+            : 0;
+        
+        const rawFontFamily = config.get<string>('fontFamily', '');
+        // Validate font family: allow alphanumeric, spaces, hyphens, commas, dots, underscores, and quotes
+        const fontFamilyPattern = /^[a-zA-Z0-9\s\-,._'"]+$/;
+        let fontFamily = '';
+        if (typeof rawFontFamily === 'string' && rawFontFamily.trim()) {
+            if (fontFamilyPattern.test(rawFontFamily)) {
+                // Escape for CSS: replace backslashes and quotes safely
+                fontFamily = rawFontFamily.trim()
+                    .replace(/\\/g, '\\\\')
+                    .replace(/'/g, "\\'")
+                    .replace(/"/g, '\\"');
+            } else {
+                // Invalid characters detected - warn user
+                void vscode.window.showWarningMessage(
+                    `PR Reviewer: Font family "${rawFontFamily.slice(0, 50)}" contains invalid characters and will be ignored.`
+                );
+                debugLog(`[Font] Invalid font family rejected: ${rawFontFamily}`);
+            }
+        }
+
         // Display size for the sprite viewport (will be scaled based on actual sprite)
         const dispSize = 128;
 
@@ -547,11 +576,16 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
+  :root {
+    --pr-reviewer-font-family: ${fontFamily ? `'${fontFamily}', ` : ''}var(--vscode-font-family);
+    --pr-reviewer-font-size: ${fontSize > 0 ? `${fontSize}px` : 'var(--vscode-font-size)'};
+  }
+
   body {
     background: var(--vscode-sideBar-background);
     color: var(--vscode-editor-foreground);
-    font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
+    font-family: var(--pr-reviewer-font-family);
+    font-size: var(--pr-reviewer-font-size);
     display: flex;
     flex-direction: column;
     height: 100vh;
