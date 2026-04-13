@@ -12,6 +12,7 @@ export interface ReviewOptions {
     baseBranch?: string;
     extraInstructions?: string;
     language?: string;
+    prNumber?: number;
 }
 
 let decorator: CodeDecorator | undefined;
@@ -95,7 +96,8 @@ export function activate(context: vscode.ExtensionContext): void {
             personalityId: typeof opts.personalityId === 'string' ? opts.personalityId : undefined,
             baseBranch: typeof opts.baseBranch === 'string' ? opts.baseBranch : undefined,
             extraInstructions: typeof opts.extraInstructions === 'string' ? opts.extraInstructions : undefined,
-            language: typeof opts.language === 'string' ? opts.language : undefined
+            language: typeof opts.language === 'string' ? opts.language : undefined,
+            prNumber: typeof opts.prNumber === 'number' && Number.isInteger(opts.prNumber) && opts.prNumber > 0 ? opts.prNumber : undefined
         };
         
         sidebarProvider.reveal();
@@ -173,7 +175,7 @@ async function runReview(
     statusBar: StatusBarCharacter,
     options: ReviewOptions = {}
 ): Promise<void> {
-    const { model: modelOverride, personalityId: personalityIdOverride, baseBranch: baseBranchOverride, extraInstructions: extraInstructionsOverride, language: languageOverride } = options;
+    const { model: modelOverride, personalityId: personalityIdOverride, baseBranch: baseBranchOverride, extraInstructions: extraInstructionsOverride, language: languageOverride, prNumber } = options;
     
     // Get personality-specific messages (with fallback for error handling)
     let messages: import('./copilotReviewer').PersonalityMessages | undefined;
@@ -192,11 +194,19 @@ async function runReview(
         statusBar.setState('thinking', 'Starting review…');
 
         // 1. Fetch the diff
-        const fetcher = new PrDiffFetcher(baseBranchOverride);
-        sidebar.showMessage(messages?.fetchingDiff ?? '📂 Fetching changes…', 'thinking');
-        sidebar.appendLog('📂 Fetching diff from git…');
-        statusBar.setState('thinking', 'Fetching diff…');
-        const diff = await fetcher.getDiff();
+        let diff: string;
+        if (prNumber) {
+            sidebar.showMessage(messages?.fetchingDiff ?? '📂 Fetching PR changes…', 'thinking');
+            sidebar.appendLog(`📂 Fetching diff for PR #${prNumber}…`);
+            statusBar.setState('thinking', `Fetching PR #${prNumber} diff…`);
+            diff = await PrDiffFetcher.getPrDiff(prNumber);
+        } else {
+            const fetcher = new PrDiffFetcher(baseBranchOverride);
+            sidebar.showMessage(messages?.fetchingDiff ?? '📂 Fetching changes…', 'thinking');
+            sidebar.appendLog('📂 Fetching diff from git…');
+            statusBar.setState('thinking', 'Fetching diff…');
+            diff = await fetcher.getDiff();
+        }
 
         if (!diff || diff.trim().length === 0) {
             sidebar.appendLog('⚠️  No diff found — nothing to review', true);

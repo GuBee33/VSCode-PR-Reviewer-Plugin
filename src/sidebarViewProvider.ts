@@ -4,6 +4,7 @@ import { execSync } from 'child_process';
 import { ReviewFinding } from './types';
 import { debugLog } from './extension';
 import { getReviewerPersonalities, SUPPORTED_LANGUAGES } from './copilotReviewer';
+import { PrDiffFetcher } from './prDiffFetcher';
 
 type CharacterState = 'idle' | 'thinking' | 'talking' | 'laughing';
 
@@ -66,11 +67,14 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                     baseBranch: typeof msg.baseBranch === 'string' ? msg.baseBranch : undefined,
                     extraInstructions: typeof msg.extraInstructions === 'string' ? msg.extraInstructions : undefined,
                     language: typeof msg.language === 'string' ? msg.language : undefined,
+                    prNumber: typeof msg.prNumber === 'number' ? msg.prNumber : undefined,
                 });
             } else if (msg.type === 'requestModels') {
                 this.sendAvailableModels();
             } else if (msg.type === 'requestBranches') {
                 this.sendAvailableBranches();
+            } else if (msg.type === 'requestPRs') {
+                void this.sendAvailablePRs().catch(err => debugLog(`[PRs] sendAvailablePRs failed: ${err}`));
             } else if (msg.type === 'requestPersonalities') {
                 this.sendAvailablePersonalities();
             } else if (msg.type === 'requestLanguages') {
@@ -287,6 +291,17 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         } catch {
             this.postMessage({ type: 'branches', branches: [], currentBranch: '' });
         }
+    }
+
+    /** Send open pull requests to the webview (uses GitHub REST API). */
+    private async sendAvailablePRs(): Promise<void> {
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceRoot) {
+            this.postMessage({ type: 'pullRequests', pullRequests: [], notAuthenticated: false });
+            return;
+        }
+        const result = await PrDiffFetcher.listOpenPRs(workspaceRoot);
+        this.postMessage({ type: 'pullRequests', pullRequests: result.prs, notAuthenticated: result.notAuthenticated || false });
     }
 
     /** Make the sidebar visible. */
@@ -957,9 +972,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  // Request available models, branches, personalities, languages and saved settings on load
+  // Request available models, branches, PRs, personalities, languages and saved settings on load
   vscode.postMessage({ type: 'requestModels' });
   vscode.postMessage({ type: 'requestBranches' });
+  vscode.postMessage({ type: 'requestPRs' });
   vscode.postMessage({ type: 'requestPersonalities' });
   vscode.postMessage({ type: 'requestLanguages' });
   vscode.postMessage({ type: 'loadSettings' });
@@ -971,10 +987,16 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     startBtn.addEventListener('click', function() {
       const selectedModel = modelSelect ? modelSelect.value : '';
       const personalityId = personalitySelect ? personalitySelect.value : 'sarcastic';
-      const baseBranch = branchSelect ? branchSelect.value : '';
+      const baseBranchValue = branchSelect ? branchSelect.value : '';
       const extraInstructions = extraInstructionsInput ? extraInstructionsInput.value : '';
       const language = languageSelect ? languageSelect.value : 'English';
-      vscode.postMessage({ type: 'startReview', model: selectedModel, personalityId: personalityId, baseBranch: baseBranch, extraInstructions: extraInstructions, language: language });
+      var prNumber = undefined;
+      var baseBranch = baseBranchValue;
+      if (baseBranchValue.indexOf('pr:') === 0) {
+        prNumber = parseInt(baseBranchValue.substring(3), 10);
+        baseBranch = '';
+      }
+      vscode.postMessage({ type: 'startReview', model: selectedModel, personalityId: personalityId, baseBranch: baseBranch, extraInstructions: extraInstructions, language: language, prNumber: prNumber });
     });
   }
 
@@ -1063,10 +1085,16 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       newStartBtn.addEventListener('click', function() {
         const selectedModel = newModelSelect ? newModelSelect.value : '';
         const personalityId = newPersonalitySelect ? newPersonalitySelect.value : 'sarcastic';
-        const baseBranch = newBranchSelect ? newBranchSelect.value : '';
+        const baseBranchValue = newBranchSelect ? newBranchSelect.value : '';
         const extraInstructions = newExtraInstructionsInput ? newExtraInstructionsInput.value : '';
         const language = newLanguageSelect ? newLanguageSelect.value : 'English';
-        vscode.postMessage({ type: 'startReview', model: selectedModel, personalityId: personalityId, baseBranch: baseBranch, extraInstructions: extraInstructions, language: language });
+        var prNumber = undefined;
+        var baseBranch = baseBranchValue;
+        if (baseBranchValue.indexOf('pr:') === 0) {
+          prNumber = parseInt(baseBranchValue.substring(3), 10);
+          baseBranch = '';
+        }
+        vscode.postMessage({ type: 'startReview', model: selectedModel, personalityId: personalityId, baseBranch: baseBranch, extraInstructions: extraInstructions, language: language, prNumber: prNumber });
       });
     }
     attachPersistenceHandlers(newBranchSelect, newModelSelect, newPersonalitySelect, newExtraInstructionsInput, newLanguageSelect);
@@ -1095,6 +1123,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     settingsLoaded = false;
     vscode.postMessage({ type: 'requestModels' });
     vscode.postMessage({ type: 'requestBranches' });
+    vscode.postMessage({ type: 'requestPRs' });
     vscode.postMessage({ type: 'requestPersonalities' });
     vscode.postMessage({ type: 'requestLanguages' });
     vscode.postMessage({ type: 'loadSettings' });
@@ -1291,6 +1320,39 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
           }
           branchesLoaded = true;
           applySavedSettings();
+        }
+        break;
+      }
+      case 'pullRequests': {
+        const branchSelect = document.getElementById('branch-select');
+        // Remove any existing PR optgroup or auth warning before re-adding
+        var existingPrGroup = branchSelect ? branchSelect.querySelector('optgroup[data-pr-group]') : null;
+        if (existingPrGroup) existingPrGroup.remove();
+        var existingAuthWarn = document.getElementById('gh-auth-warning');
+        if (existingAuthWarn) existingAuthWarn.remove();
+
+        if (msg.notAuthenticated) {
+          // Show a warning message with instructions to sign in
+          var branchRow = branchSelect ? branchSelect.closest('.input-row') : null;
+          if (branchRow) {
+            var warn = document.createElement('div');
+            warn.id = 'gh-auth-warning';
+            warn.style.cssText = 'font-size:0.75em; color:var(--vscode-editorWarning-foreground,#cca700); margin-top:4px; line-height:1.4;';
+            warn.innerHTML = '\u26A0\uFE0F To list open PRs, sign in to GitHub: open the Command Palette (<b>Ctrl+Shift+P</b>) and run <b>"GitHub: Sign In"</b>.';
+            branchRow.appendChild(warn);
+          }
+        } else if (branchSelect && msg.pullRequests && msg.pullRequests.length > 0) {
+          var prGroup = document.createElement('optgroup');
+          prGroup.label = 'Open Pull Requests';
+          prGroup.setAttribute('data-pr-group', 'true');
+          for (var i = 0; i < msg.pullRequests.length; i++) {
+            var pr = msg.pullRequests[i];
+            var opt = document.createElement('option');
+            opt.value = 'pr:' + pr.number;
+            opt.textContent = 'PR #' + pr.number + ': ' + pr.title + ' (' + pr.headRefName + ' \u2192 ' + pr.baseRefName + ')';
+            prGroup.appendChild(opt);
+          }
+          branchSelect.insertBefore(prGroup, branchSelect.firstChild);
         }
         break;
       }
