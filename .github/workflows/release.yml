@@ -59,6 +59,11 @@ jobs:
           asset_name: ${{ env.VSIX_FILE }}
           asset_content_type: application/octet-stream
 
+      - name: Publish to VS Code Marketplace
+        run: vsce publish --no-dependencies -p ${{ secrets.VSCE_PAT }}
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
       - name: Upload VSIX as artifact
         uses: actions/upload-artifact@v4
         with:
