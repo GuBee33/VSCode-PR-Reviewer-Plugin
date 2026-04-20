@@ -301,7 +301,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             return;
         }
         const result = await PrDiffFetcher.listOpenPRs(workspaceRoot);
-        this.postMessage({ type: 'pullRequests', pullRequests: result.prs, notAuthenticated: result.notAuthenticated || false });
+        this.postMessage({ type: 'pullRequests', pullRequests: result.prs, notAuthenticated: result.notAuthenticated || false, host: result.host || 'github.com' });
     }
 
     /** Make the sidebar visible. */
@@ -1338,7 +1338,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             var warn = document.createElement('div');
             warn.id = 'gh-auth-warning';
             warn.style.cssText = 'font-size:0.75em; color:var(--vscode-editorWarning-foreground,#cca700); margin-top:4px; line-height:1.4;';
-            warn.innerHTML = '\u26A0\uFE0F To list open PRs, sign in to GitHub: open the Command Palette (<b>Ctrl+Shift+P</b>) and run <b>"GitHub: Sign In"</b>.';
+            var isGHE = msg.host && msg.host !== 'github.com';
+            if (isGHE) {
+              warn.innerHTML = '⚠️ To list open PRs, sign in to GitHub Enterprise: open the Command Palette (<b>Cmd+Shift+P</b>) and run <b>"GitHub Enterprise: Sign In"</b>, or add a PAT for <b>' + msg.host + '</b> in Settings.';
+            } else {
+              warn.innerHTML = '⚠️ To list open PRs, sign in to GitHub: open the Command Palette (<b>Cmd+Shift+P</b>) and run <b>"GitHub: Sign In"</b>.';
+            }
             branchRow.appendChild(warn);
           }
         } else if (branchSelect && msg.pullRequests && msg.pullRequests.length > 0) {
