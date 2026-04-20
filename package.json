@@ -152,6 +152,24 @@
           "type": "string",
           "default": "",
           "description": "Custom font family for the PR Reviewer panel. Leave empty to use VS Code's default font."
+        },
+        "prReviewer.githubPATs": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "properties": {
+                  "pat": { "type": "string", "description": "Personal Access Token" },
+                  "apiBaseUrl": { "type": "string", "description": "Custom API base URL (e.g., https://github.mycompany.com/api/v3). If omitted, defaults to https://{host}/api/v3 for GitHub Enterprise." }
+                },
+                "required": ["pat"]
+              }
+            ]
+          },
+          "markdownDescription": "Map of GitHub host URLs to Personal Access Tokens (PATs).\n\n**Simple format:** `{ \"github.com\": \"ghp_xxxx\" }`\n\n**With custom API URL:** `{ \"github.mycompany.com\": { \"pat\": \"ghp_xxxx\", \"apiBaseUrl\": \"https://github.mycompany.com/api/v3\" } }`\n\nWhen a PAT is configured, it will be used instead of VS Code's built-in GitHub authentication.\n\n**Required PAT permissions:** `repo` scope (for private repositories) or `public_repo` scope (for public repositories only)."
         }
       }
     }

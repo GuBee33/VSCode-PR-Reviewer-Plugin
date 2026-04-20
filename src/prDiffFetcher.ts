@@ -142,15 +142,17 @@ export class PrDiffFetcher {
             throw new Error('No workspace folder is open. Please open a Git repository.');
         }
 
-        const { owner, repo } = PrDiffFetcher.getOwnerAndRepo(workspaceRoot);
-        const token = await PrDiffFetcher.getGitHubToken();
+        const { owner, repo, host } = PrDiffFetcher.getOwnerAndRepo(workspaceRoot);
+        const auth = await PrDiffFetcher.getGitHubAuth(host);
 
-        debugLog(`[Diff] Fetching PR #${prNumber} diff via GitHub API (${owner}/${repo})`);
+        debugLog(`[Diff] Fetching PR #${prNumber} diff via GitHub API (${host}/${owner}/${repo})`);
 
         const diff = await PrDiffFetcher.githubRequest<string>(
             `/repos/${owner}/${repo}/pulls/${prNumber}`,
-            token,
-            'application/vnd.github.v3.diff'
+            auth.token,
+            host,
+            'application/vnd.github.v3.diff',
+            auth.apiBaseUrl
         );
 
         debugLog(`[Diff] PR #${prNumber} diff length: ${diff.length} chars`);
@@ -165,16 +167,41 @@ export class PrDiffFetcher {
     static async listOpenPRs(workspaceRoot: string): Promise<{
         prs: Array<{ number: number; title: string; headRefName: string; baseRefName: string }>;
         notAuthenticated?: boolean;
+        host?: string;
         error?: string;
     }> {
         try {
-            const { owner, repo } = PrDiffFetcher.getOwnerAndRepo(workspaceRoot);
+            const { owner, repo, host } = PrDiffFetcher.getOwnerAndRepo(workspaceRoot);
 
-            // Use silent: true so we never prompt — just check for an existing session
-            const session = await vscode.authentication.getSession('github', ['repo'], { silent: true });
-            if (!session) {
-                debugLog('[PRs] No GitHub session found (silent check)');
-                return { prs: [], notAuthenticated: true };
+            // First check for a PAT in settings
+            const settingsConfig = PrDiffFetcher.getGitHubConfigFromSettings(host);
+            
+            let token: string | undefined;
+            let apiBaseUrl: string | undefined;
+            
+            if (settingsConfig) {
+                debugLog(`[PRs] Using PAT from settings for host: ${host}`);
+                token = settingsConfig.token;
+                apiBaseUrl = settingsConfig.apiBaseUrl;
+            } else if (host === 'github.com') {
+                // Use silent: true so we never prompt — just check for an existing session
+                const session = await vscode.authentication.getSession('github', ['repo'], { silent: true });
+                if (!session) {
+                    debugLog('[PRs] No GitHub session found (silent check)');
+                    return { prs: [], notAuthenticated: true, host };
+                }
+                token = session.accessToken;
+            } else {
+                // Try GitHub Enterprise authentication provider
+                // The 'github-enterprise' provider may have sessions for GHE instances
+                const gheSession = await vscode.authentication.getSession('github-enterprise', ['repo'], { silent: true });
+                if (gheSession) {
+                    debugLog(`[PRs] Using GitHub Enterprise session for host: ${host}`);
+                    token = gheSession.accessToken;
+                } else {
+                    debugLog(`[PRs] No PAT or GHE session found for host: ${host}`);
+                    return { prs: [], notAuthenticated: true, host };
+                }
             }
 
             const prs = await PrDiffFetcher.githubRequest<Array<{
@@ -182,7 +209,7 @@ export class PrDiffFetcher {
                 title: string;
                 head: { ref: string };
                 base: { ref: string };
-            }>>(`/repos/${owner}/${repo}/pulls?state=open&per_page=20`, session.accessToken);
+            }>>(`/repos/${owner}/${repo}/pulls?state=open&per_page=20`, token, host, 'application/vnd.github.v3+json', apiBaseUrl);
 
             return {
                 prs: prs.map(pr => ({
@@ -198,42 +225,132 @@ export class PrDiffFetcher {
         }
     }
 
-    /** Get a GitHub token via VS Code's built-in authentication provider. */
-    private static async getGitHubToken(createIfNone = true): Promise<string> {
-        const session = await vscode.authentication.getSession('github', ['repo'], { createIfNone });
-        if (!session) {
-            throw new Error('GitHub authentication is required. Please sign in to GitHub in VS Code.');
+    /**
+     * Get GitHub config (token + optional API base URL) from settings for a given host.
+     * Returns undefined if no PAT is configured for this host.
+     */
+    private static getGitHubConfigFromSettings(host: string): { token: string; apiBaseUrl?: string } | undefined {
+        const config = vscode.workspace.getConfiguration('prReviewer');
+        const patMap = config.get<Record<string, string | { pat: string; apiBaseUrl?: string }>>('githubPATs', {});
+        
+        const entry = patMap[host];
+        if (!entry) {
+            return undefined;
         }
-        return session.accessToken;
+        
+        if (typeof entry === 'string') {
+            return { token: entry };
+        }
+        
+        return { token: entry.pat, apiBaseUrl: entry.apiBaseUrl };
     }
 
-    /** Extract owner/repo from the git remote URL. */
-    private static getOwnerAndRepo(cwd: string): { owner: string; repo: string } {
+    /**
+     * Get a GitHub token and optional API base URL.
+     * First checks settings for a PAT, then falls back to VS Code's built-in authentication.
+     * @param host The GitHub host (e.g., 'github.com' or 'github.mycompany.com')
+     * @param createIfNone Whether to prompt for authentication if no session exists
+     */
+    private static async getGitHubAuth(host: string = 'github.com', createIfNone = true): Promise<{ token: string; apiBaseUrl?: string }> {
+        // First, check if there's a PAT configured for this host
+        const settingsConfig = PrDiffFetcher.getGitHubConfigFromSettings(host);
+        if (settingsConfig) {
+            debugLog(`[Auth] Using PAT from settings for host: ${host}${settingsConfig.apiBaseUrl ? ` (custom API: ${settingsConfig.apiBaseUrl})` : ''}`);
+            return settingsConfig;
+        }
+        
+        // Fall back to VS Code's built-in GitHub authentication
+        if (host === 'github.com') {
+            debugLog(`[Auth] Using VS Code built-in GitHub authentication for: ${host}`);
+            const session = await vscode.authentication.getSession('github', ['repo'], { createIfNone });
+            if (!session) {
+                throw new Error('GitHub authentication is required. Please sign in to GitHub in VS Code.');
+            }
+            return { token: session.accessToken };
+        }
+        
+        // Try GitHub Enterprise authentication provider
+        debugLog(`[Auth] Trying GitHub Enterprise authentication for: ${host}`);
+        const gheSession = await vscode.authentication.getSession('github-enterprise', ['repo'], { createIfNone });
+        if (gheSession) {
+            debugLog(`[Auth] Using GitHub Enterprise session for host: ${host}`);
+            return { token: gheSession.accessToken };
+        }
+        
+        throw new Error(
+            `No authentication found for GitHub Enterprise host '${host}'. ` +
+            `Either sign in via 'GitHub Enterprise: Sign In' command, or ` +
+            `add a PAT in Settings > PR Reviewer > GitHub PATs. ` +
+            `Required permissions: 'repo' scope for private repos, or 'public_repo' for public repos only.`
+        );
+    }
+
+    /**
+     * Get a GitHub token - first checks settings for a PAT, then falls back to VS Code's built-in authentication.
+     * @param host The GitHub host (e.g., 'github.com' or 'github.mycompany.com')
+     * @param createIfNone Whether to prompt for authentication if no session exists
+     * @deprecated Use getGitHubAuth instead to also get the optional apiBaseUrl
+     */
+    private static async getGitHubToken(host: string = 'github.com', createIfNone = true): Promise<string> {
+        const auth = await PrDiffFetcher.getGitHubAuth(host, createIfNone);
+        return auth.token;
+    }
+
+    /** Extract owner/repo and host from the git remote URL. */
+    private static getOwnerAndRepo(cwd: string): { owner: string; repo: string; host: string } {
         try {
             const remoteUrl = execSync('git remote get-url origin', {
                 cwd,
                 stdio: ['pipe', 'pipe', 'pipe']
             }).toString().trim();
 
-            // Match HTTPS: https://github.com/owner/repo.git
-            // Match SSH:   git@github.com:owner/repo.git
-            const match = remoteUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
+            // Match HTTPS: https://github.com/owner/repo.git or https://github.mycompany.com/owner/repo.git
+            // Match SSH:   git@github.com:owner/repo.git or git@github.mycompany.com:owner/repo.git
+            const httpsMatch = remoteUrl.match(/https:\/\/([^/]+)\/([^/]+)\/([^/.]+)/);
+            const sshMatch = remoteUrl.match(/git@([^:]+):([^/]+)\/([^/.]+)/);
+            
+            const match = httpsMatch || sshMatch;
             if (!match) {
                 throw new Error(`Could not parse GitHub owner/repo from remote URL: ${remoteUrl}`);
             }
-            return { owner: match[1], repo: match[2] };
+            return { host: match[1], owner: match[2], repo: match[3] };
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             throw new Error(`Failed to determine GitHub repository: ${msg}`);
         }
     }
 
-    /** Make an authenticated request to the GitHub REST API. */
-    private static githubRequest<T>(path: string, token: string, accept = 'application/vnd.github.v3+json'): Promise<T> {
+    /**
+     * Make an authenticated request to the GitHub REST API.
+     * @param path The API path (e.g., '/repos/owner/repo/pulls')
+     * @param token The authentication token
+     * @param host The GitHub host (e.g., 'github.com' or 'github.mycompany.com')
+     * @param accept The Accept header value
+     * @param apiBaseUrl Optional custom API base URL (overrides default host-based URL)
+     */
+    private static githubRequest<T>(path: string, token: string, host: string = 'github.com', accept = 'application/vnd.github.v3+json', apiBaseUrl?: string): Promise<T> {
         return new Promise<T>((resolve, reject) => {
+            let apiHost: string;
+            let apiPath: string;
+            
+            if (apiBaseUrl) {
+                // Parse custom API base URL
+                const url = new URL(apiBaseUrl);
+                apiHost = url.hostname;
+                // Combine the base path from URL with the API path
+                const basePath = url.pathname.replace(/\/$/, ''); // Remove trailing slash
+                apiPath = basePath + path;
+            } else {
+                // Default: github.com uses api.github.com; GitHub Enterprise uses host/api/v3
+                apiHost = host === 'github.com' ? 'api.github.com' : host;
+                apiPath = host === 'github.com' ? path : `/api/v3${path}`;
+            }
+            
+            debugLog(`[API] Request to: ${apiHost}${apiPath}`);
+            
             const options: https.RequestOptions = {
-                hostname: 'api.github.com',
-                path,
+                hostname: apiHost,
+                path: apiPath,
                 method: 'GET',
                 headers: {
                     'User-Agent': 'VSCode-PR-Reviewer',
