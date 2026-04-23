@@ -385,6 +385,117 @@ export class PrDiffFetcher {
         });
     }
 
+    private static githubGraphQLRequest<T>(query: string, variables: Record<string, unknown>, token: string, host: string = 'github.com', apiBaseUrl?: string): Promise<T> {
+        return new Promise<T>((resolve, reject) => {
+            let apiHost: string;
+            let apiPath: string;
+
+            if (apiBaseUrl) {
+                const url = new URL(apiBaseUrl);
+                apiHost = url.hostname;
+                apiPath = url.pathname.replace(/\/$/, '') + '/graphql';
+            } else {
+                apiHost = host === 'github.com' ? 'api.github.com' : host;
+                apiPath = host === 'github.com' ? '/graphql' : '/api/graphql';
+            }
+
+            const body = JSON.stringify({ query, variables });
+
+            const options: https.RequestOptions = {
+                hostname: apiHost,
+                path: apiPath,
+                method: 'POST',
+                headers: {
+                    'User-Agent': 'VSCode-PR-Reviewer',
+                    'Authorization': `bearer ${token}`,
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(body),
+                },
+            };
+
+            const req = https.request(options, (res) => {
+                const chunks: Buffer[] = [];
+                res.on('data', (chunk: Buffer) => chunks.push(chunk));
+                res.on('end', () => {
+                    const raw = Buffer.concat(chunks).toString('utf-8');
+                    if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                        try {
+                            const parsed = JSON.parse(raw);
+                            if (parsed.errors && parsed.errors.length > 0) {
+                                reject(new Error(`GitHub GraphQL error: ${parsed.errors[0].message}`));
+                            } else {
+                                resolve(parsed.data as T);
+                            }
+                        } catch {
+                            reject(new Error(`Invalid JSON from GitHub GraphQL: ${raw.slice(0, 200)}`));
+                        }
+                    } else {
+                        reject(new Error(`GitHub GraphQL returned ${res.statusCode}: ${raw.slice(0, 300)}`));
+                    }
+                });
+            });
+
+            req.on('error', (err) => reject(new Error(`GitHub GraphQL request failed: ${err.message}`)));
+            req.write(body);
+            req.end();
+        });
+    }
+
+    /**
+     * Fetches the set of review comment database IDs that belong to resolved threads.
+     */
+    private static async getResolvedCommentIds(prNumber: number, auth: { token: string; apiBaseUrl?: string }, host: string, owner: string, repo: string): Promise<Set<number>> {
+        const resolvedIds = new Set<number>();
+        let hasNextPage = true;
+        let cursor: string | null = null;
+
+        const query = `query($owner: String!, $repo: String!, $pr: Int!, $after: String) {
+            repository(owner: $owner, name: $repo) {
+                pullRequest(number: $pr) {
+                    reviewThreads(first: 100, after: $after) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                            isResolved
+                            comments(first: 1) {
+                                nodes { databaseId }
+                            }
+                        }
+                    }
+                }
+            }
+        }`;
+
+        type ReviewThreadsResponse = {
+            repository: {
+                pullRequest: {
+                    reviewThreads: {
+                        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+                        nodes: Array<{
+                            isResolved: boolean;
+                            comments: { nodes: Array<{ databaseId: number }> };
+                        }>;
+                    };
+                };
+            };
+        };
+
+        while (hasNextPage) {
+            const data: ReviewThreadsResponse = await PrDiffFetcher.githubGraphQLRequest<ReviewThreadsResponse>(query, { owner, repo, pr: prNumber, after: cursor }, auth.token, host, auth.apiBaseUrl);
+
+            const threads = data.repository.pullRequest.reviewThreads;
+            for (const thread of threads.nodes) {
+                if (thread.isResolved && thread.comments.nodes.length > 0) {
+                    resolvedIds.add(thread.comments.nodes[0].databaseId);
+                }
+            }
+            hasNextPage = threads.pageInfo.hasNextPage;
+            cursor = threads.pageInfo.endCursor;
+        }
+
+        return resolvedIds;
+    }
+
     /**
      * Fetches findings from a PR via reviews and check runs.
      * Includes PR reviews and CI/CD check annotations.
@@ -403,6 +514,16 @@ export class PrDiffFetcher {
         const findings: import('./types').ReviewFinding[] = [];
 
         try {
+            // Fetch resolved thread IDs via GraphQL so we can skip them
+            let resolvedCommentIds = new Set<number>();
+            try {
+                resolvedCommentIds = await PrDiffFetcher.getResolvedCommentIds(prNumber, auth, host, owner, repo);
+                debugLog(`[Findings] Found ${resolvedCommentIds.size} resolved review thread(s)`);
+            } catch (gqlErr) {
+                debugLog(`[Findings] Could not fetch resolved threads (GraphQL): ${gqlErr}`);
+                // Continue without filtering — show all comments
+            }
+
             // Fetch inline review comments (with file and line info)
             debugLog(`[Findings] Fetching inline review comments for PR #${prNumber}`);
             const reviewComments = await PrDiffFetcher.githubRequest<Array<{
@@ -418,8 +539,8 @@ export class PrDiffFetcher {
 
             for (const comment of reviewComments) {
                 if (comment.body && comment.body.trim()) {
-                    // Only include top-level comments (not replies)
-                    if (!comment.in_reply_to_id) {
+                    // Only include top-level comments (not replies) that are not resolved
+                    if (!comment.in_reply_to_id && !resolvedCommentIds.has(comment.id)) {
                         const inlineCommentFinding: import('./types').ReviewFinding = {
                             file: comment.path,
                             line: comment.line,

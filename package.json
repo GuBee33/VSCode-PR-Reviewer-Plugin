@@ -31,6 +31,10 @@
         "icon": "$(play)"
       },
       {
+        "command": "prReviewer.fetchPrFindings",
+        "title": "PR Reviewer: Fetch PR Findings Only"
+      },
+      {
         "command": "prReviewer.clearDecorations",
         "title": "PR Reviewer: Clear All Review Decorations"
       },

@@ -161,7 +161,13 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage('Custom work sprite cleared. Using default.');
     });
 
-    context.subscriptions.push(sidebarReg, statusBar, reviewCmd, clearCmd, resetCmd, settingsCmd, browseIdleSpriteCmd, browseWorkSpriteCmd, clearIdleSpriteCmd, clearWorkSpriteCmd, decorator);
+    const fetchPrFindingsCmd = vscode.commands.registerCommand('prReviewer.fetchPrFindings', async (prNumber: unknown) => {
+        if (typeof prNumber !== 'number' || !Number.isInteger(prNumber) || prNumber <= 0) { return; }
+        sidebarProvider.reveal();
+        await fetchPrFindings(sidebarProvider, statusBar, prNumber);
+    });
+
+    context.subscriptions.push(sidebarReg, statusBar, reviewCmd, fetchPrFindingsCmd, clearCmd, resetCmd, settingsCmd, browseIdleSpriteCmd, browseWorkSpriteCmd, clearIdleSpriteCmd, clearWorkSpriteCmd, decorator);
 }
 
 export function deactivate(): void {
@@ -283,6 +289,50 @@ async function runReview(
         sidebar.appendLog(`❌ Error: ${msg}`, true);
         const errorMessage = messages?.error?.replace('{error}', msg) ?? `An error occurred: ${msg}`;
         sidebar.showMessage(errorMessage, 'idle');
+        statusBar.setState('error', `Error: ${msg}`);
+        vscode.window.showErrorMessage(`PR Reviewer error: ${msg}`);
+        sidebar.setReviewingState(false);
+    }
+}
+
+async function fetchPrFindings(
+    sidebar: SidebarViewProvider,
+    statusBar: StatusBarCharacter,
+    prNumber: number
+): Promise<void> {
+    try {
+        sidebar.setReviewingState(true);
+        sidebar.clearLog();
+        sidebar.appendLog(`🚀 Fetching PR #${prNumber} findings…`);
+        sidebar.showMessage('📝 Fetching PR findings…', 'thinking');
+        statusBar.setState('thinking', `Fetching PR #${prNumber} findings…`);
+
+        const findings = await PrDiffFetcher.getPrFindings(prNumber);
+
+        if (!findings || findings.length === 0) {
+            sidebar.appendLog('✅ No existing findings on this PR');
+            sidebar.showMessage('No findings found on this PR.', 'idle');
+            statusBar.setState('done', 'No PR findings');
+            sidebar.setReviewingState(false);
+            return;
+        }
+
+        const errors   = findings.filter(f => f.severity === 'error').length;
+        const warnings = findings.filter(f => f.severity === 'warning').length;
+        const infos    = findings.filter(f => f.severity === 'info').length;
+        const summary = `${findings.length} finding${findings.length !== 1 ? 's' : ''}: ` +
+            `${errors} error${errors !== 1 ? 's' : ''}, ` +
+            `${warnings} warning${warnings !== 1 ? 's' : ''}, ` +
+            `${infos} note${infos !== 1 ? 's' : ''}`;
+        sidebar.appendLog(`✅ Fetched ${summary}`);
+
+        sidebar.showFindings(findings);
+        statusBar.setState('done', summary);
+        sidebar.setReviewingState(false);
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sidebar.appendLog(`❌ Error: ${msg}`, true);
+        sidebar.showMessage(`Error fetching PR findings: ${msg}`, 'idle');
         statusBar.setState('error', `Error: ${msg}`);
         vscode.window.showErrorMessage(`PR Reviewer error: ${msg}`);
         sidebar.setReviewingState(false);
