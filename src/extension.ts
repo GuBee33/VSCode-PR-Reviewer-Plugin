@@ -161,7 +161,13 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage('Custom work sprite cleared. Using default.');
     });
 
-    context.subscriptions.push(sidebarReg, statusBar, reviewCmd, clearCmd, resetCmd, settingsCmd, browseIdleSpriteCmd, browseWorkSpriteCmd, clearIdleSpriteCmd, clearWorkSpriteCmd, decorator);
+    const fetchPrFindingsCmd = vscode.commands.registerCommand('prReviewer.fetchPrFindings', async (prNumber: unknown) => {
+        if (typeof prNumber !== 'number' || !Number.isInteger(prNumber) || prNumber <= 0) { return; }
+        sidebarProvider.reveal();
+        await fetchPrFindings(sidebarProvider, statusBar, prNumber);
+    });
+
+    context.subscriptions.push(sidebarReg, statusBar, reviewCmd, fetchPrFindingsCmd, clearCmd, resetCmd, settingsCmd, browseIdleSpriteCmd, browseWorkSpriteCmd, clearIdleSpriteCmd, clearWorkSpriteCmd, decorator);
 }
 
 export function deactivate(): void {
@@ -219,17 +225,94 @@ async function runReview(
         const diffLines = diff.trim().split('\n').length;
         sidebar.appendLog(`✅ Diff fetched — ${diffLines} line${diffLines !== 1 ? 's' : ''} changed`);
 
-        // 2. Send to Copilot
+        // 2. Fetch existing PR findings (reviews, checks, etc.)
+        let existingFindings: import('./types').ReviewFinding[] = [];
+        if (prNumber) {
+            try {
+                sidebar.appendLog('📝 Fetching existing PR findings...');
+                existingFindings = await PrDiffFetcher.getPrFindings(prNumber);
+                if (existingFindings.length > 0) {
+                    sidebar.appendLog(`✅ Fetched ${existingFindings.length} existing finding${existingFindings.length !== 1 ? 's' : ''}`);
+                }
+            } catch (err) {
+                debugLog(`[Review] Failed to fetch PR findings: ${err}`);
+                // Continue without existing findings
+                sidebar.appendLog(`⚠️  Could not fetch existing PR findings`, false);
+            }
+        }
+
+        // 3. Send to Copilot
         sidebar.showMessage(messages?.reviewing ?? '🤔 Reviewing code…', 'thinking');
         sidebar.appendLog('🤖 Sending diff to Copilot for review…');
         statusBar.setState('thinking', `Reviewing ${diffLines} lines…`);
         const reviewer = new CopilotReviewer({ model: modelOverride, personalityId: personalityIdOverride, extraInstructions: extraInstructionsOverride, language: languageOverride });
-        const findings = await reviewer.review(diff);
+        const copilotFindings = await reviewer.review(diff);
 
-        if (!findings || findings.length === 0) {
+        // Merge findings: mark Copilot findings with source if not set
+        const mergedFindings = [
+            ...existingFindings,
+            ...(copilotFindings || []).map(f => ({ ...f, source: f.source || 'copilot' }))
+        ];
+
+        if (!mergedFindings || mergedFindings.length === 0) {
             sidebar.appendLog('✅ Review complete — no findings');
             sidebar.showMessage(messages?.noFindings ?? 'No issues found!', 'idle');
             statusBar.setState('done', 'No issues found');
+            sidebar.setReviewingState(false);
+            return;
+        }
+
+        const errors   = mergedFindings.filter(f => f.severity === 'error').length;
+        const warnings = mergedFindings.filter(f => f.severity === 'warning').length;
+        const infos    = mergedFindings.filter(f => f.severity === 'info').length;
+        const summary = `${mergedFindings.length} finding${mergedFindings.length !== 1 ? 's' : ''}: ` +
+            `${errors} error${errors !== 1 ? 's' : ''}, ` +
+            `${warnings} warning${warnings !== 1 ? 's' : ''}, ` +
+            `${infos} note${infos !== 1 ? 's' : ''}`;
+        sidebar.appendLog(`✅ Review complete — ${summary}`);
+
+        // 4. Apply decorations (only for Copilot findings with file:line info)
+        sidebar.appendLog('🎨 Applying inline decorations…');
+        statusBar.setState('thinking', 'Applying decorations…');
+        decorator.clearAll();
+        const decorableFindingsForDecorator = copilotFindings ? copilotFindings.filter(f => f.line > 0) : [];
+        await decorator.applyFindings(decorableFindingsForDecorator);
+        sidebar.appendLog('✅ Decorations applied');
+
+        // 5. Present findings in sidebar
+        sidebar.showFindings(mergedFindings);
+        statusBar.setState('done', summary);
+        sidebar.setReviewingState(false);
+
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sidebar.appendLog(`❌ Error: ${msg}`, true);
+        const errorMessage = messages?.error?.replace('{error}', msg) ?? `An error occurred: ${msg}`;
+        sidebar.showMessage(errorMessage, 'idle');
+        statusBar.setState('error', `Error: ${msg}`);
+        vscode.window.showErrorMessage(`PR Reviewer error: ${msg}`);
+        sidebar.setReviewingState(false);
+    }
+}
+
+async function fetchPrFindings(
+    sidebar: SidebarViewProvider,
+    statusBar: StatusBarCharacter,
+    prNumber: number
+): Promise<void> {
+    try {
+        sidebar.setReviewingState(true);
+        sidebar.clearLog();
+        sidebar.appendLog(`🚀 Fetching PR #${prNumber} findings…`);
+        sidebar.showMessage('📝 Fetching PR findings…', 'thinking');
+        statusBar.setState('thinking', `Fetching PR #${prNumber} findings…`);
+
+        const findings = await PrDiffFetcher.getPrFindings(prNumber);
+
+        if (!findings || findings.length === 0) {
+            sidebar.appendLog('✅ No existing findings on this PR');
+            sidebar.showMessage('No findings found on this PR.', 'idle');
+            statusBar.setState('done', 'No PR findings');
             sidebar.setReviewingState(false);
             return;
         }
@@ -241,25 +324,15 @@ async function runReview(
             `${errors} error${errors !== 1 ? 's' : ''}, ` +
             `${warnings} warning${warnings !== 1 ? 's' : ''}, ` +
             `${infos} note${infos !== 1 ? 's' : ''}`;
-        sidebar.appendLog(`✅ Review complete — ${summary}`);
+        sidebar.appendLog(`✅ Fetched ${summary}`);
 
-        // 3. Apply decorations
-        sidebar.appendLog('🎨 Applying inline decorations…');
-        statusBar.setState('thinking', 'Applying decorations…');
-        decorator.clearAll();
-        await decorator.applyFindings(findings);
-        sidebar.appendLog('✅ Decorations applied');
-
-        // 4. Present findings in sidebar
         sidebar.showFindings(findings);
         statusBar.setState('done', summary);
         sidebar.setReviewingState(false);
-
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         sidebar.appendLog(`❌ Error: ${msg}`, true);
-        const errorMessage = messages?.error?.replace('{error}', msg) ?? `An error occurred: ${msg}`;
-        sidebar.showMessage(errorMessage, 'idle');
+        sidebar.showMessage(`Error fetching PR findings: ${msg}`, 'idle');
         statusBar.setState('error', `Error: ${msg}`);
         vscode.window.showErrorMessage(`PR Reviewer error: ${msg}`);
         sidebar.setReviewingState(false);

@@ -384,4 +384,242 @@ export class PrDiffFetcher {
             req.end();
         });
     }
+
+    private static githubGraphQLRequest<T>(query: string, variables: Record<string, unknown>, token: string, host: string = 'github.com', apiBaseUrl?: string): Promise<T> {
+        return new Promise<T>((resolve, reject) => {
+            let apiHost: string;
+            let apiPath: string;
+
+            if (apiBaseUrl) {
+                const url = new URL(apiBaseUrl);
+                apiHost = url.hostname;
+                apiPath = url.pathname.replace(/\/$/, '') + '/graphql';
+            } else {
+                apiHost = host === 'github.com' ? 'api.github.com' : host;
+                apiPath = host === 'github.com' ? '/graphql' : '/api/graphql';
+            }
+
+            const body = JSON.stringify({ query, variables });
+
+            const options: https.RequestOptions = {
+                hostname: apiHost,
+                path: apiPath,
+                method: 'POST',
+                headers: {
+                    'User-Agent': 'VSCode-PR-Reviewer',
+                    'Authorization': `bearer ${token}`,
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(body),
+                },
+            };
+
+            const req = https.request(options, (res) => {
+                const chunks: Buffer[] = [];
+                res.on('data', (chunk: Buffer) => chunks.push(chunk));
+                res.on('end', () => {
+                    const raw = Buffer.concat(chunks).toString('utf-8');
+                    if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                        try {
+                            const parsed = JSON.parse(raw);
+                            if (parsed.errors && parsed.errors.length > 0) {
+                                reject(new Error(`GitHub GraphQL error: ${parsed.errors[0].message}`));
+                            } else {
+                                resolve(parsed.data as T);
+                            }
+                        } catch {
+                            reject(new Error(`Invalid JSON from GitHub GraphQL: ${raw.slice(0, 200)}`));
+                        }
+                    } else {
+                        reject(new Error(`GitHub GraphQL returned ${res.statusCode}: ${raw.slice(0, 300)}`));
+                    }
+                });
+            });
+
+            req.on('error', (err) => reject(new Error(`GitHub GraphQL request failed: ${err.message}`)));
+            req.write(body);
+            req.end();
+        });
+    }
+
+    /**
+     * Fetches the set of review comment database IDs that belong to resolved threads.
+     */
+    private static async getResolvedCommentIds(prNumber: number, auth: { token: string; apiBaseUrl?: string }, host: string, owner: string, repo: string): Promise<Set<number>> {
+        const resolvedIds = new Set<number>();
+        let hasNextPage = true;
+        let cursor: string | null = null;
+
+        const query = `query($owner: String!, $repo: String!, $pr: Int!, $after: String) {
+            repository(owner: $owner, name: $repo) {
+                pullRequest(number: $pr) {
+                    reviewThreads(first: 100, after: $after) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                            isResolved
+                            comments(first: 1) {
+                                nodes { databaseId }
+                            }
+                        }
+                    }
+                }
+            }
+        }`;
+
+        type ReviewThreadsResponse = {
+            repository: {
+                pullRequest: {
+                    reviewThreads: {
+                        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+                        nodes: Array<{
+                            isResolved: boolean;
+                            comments: { nodes: Array<{ databaseId: number }> };
+                        }>;
+                    };
+                };
+            };
+        };
+
+        while (hasNextPage) {
+            const data: ReviewThreadsResponse = await PrDiffFetcher.githubGraphQLRequest<ReviewThreadsResponse>(query, { owner, repo, pr: prNumber, after: cursor }, auth.token, host, auth.apiBaseUrl);
+
+            const threads = data.repository.pullRequest.reviewThreads;
+            for (const thread of threads.nodes) {
+                if (thread.isResolved && thread.comments.nodes.length > 0) {
+                    resolvedIds.add(thread.comments.nodes[0].databaseId);
+                }
+            }
+            hasNextPage = threads.pageInfo.hasNextPage;
+            cursor = threads.pageInfo.endCursor;
+        }
+
+        return resolvedIds;
+    }
+
+    /**
+     * Fetches findings from a PR via reviews and check runs.
+     * Includes PR reviews and CI/CD check annotations.
+     */
+    static async getPrFindings(prNumber: number): Promise<import('./types').ReviewFinding[]> {
+        const workspaceRoot = PrDiffFetcher.findWorkspaceRoot();
+        if (!workspaceRoot) {
+            throw new Error('No workspace folder is open. Please open a Git repository.');
+        }
+
+        const { owner, repo, host } = PrDiffFetcher.getOwnerAndRepo(workspaceRoot);
+        const auth = await PrDiffFetcher.getGitHubAuth(host, false);
+
+        debugLog(`[Findings] Fetching PR #${prNumber} findings from GitHub (${host}/${owner}/${repo})`);
+
+        const findings: import('./types').ReviewFinding[] = [];
+
+        try {
+            // Fetch resolved thread IDs via GraphQL so we can skip them
+            let resolvedCommentIds = new Set<number>();
+            try {
+                resolvedCommentIds = await PrDiffFetcher.getResolvedCommentIds(prNumber, auth, host, owner, repo);
+                debugLog(`[Findings] Found ${resolvedCommentIds.size} resolved review thread(s)`);
+            } catch (gqlErr) {
+                debugLog(`[Findings] Could not fetch resolved threads (GraphQL): ${gqlErr}`);
+                // Continue without filtering — show all comments
+            }
+
+            // Fetch inline review comments (with file and line info)
+            debugLog(`[Findings] Fetching inline review comments for PR #${prNumber}`);
+            const reviewComments = await PrDiffFetcher.githubRequest<Array<{
+                id: number;
+                user: { login: string };
+                body: string;
+                path: string;
+                line: number;
+                original_line?: number;
+                in_reply_to_id?: number;
+                state?: string;
+            }>>(`/repos/${owner}/${repo}/pulls/${prNumber}/comments`, auth.token, host, 'application/vnd.github.v3+json', auth.apiBaseUrl);
+
+            for (const comment of reviewComments) {
+                if (comment.body && comment.body.trim()) {
+                    // Only include top-level comments (not replies) that are not resolved
+                    if (!comment.in_reply_to_id && !resolvedCommentIds.has(comment.id)) {
+                        const inlineCommentFinding: import('./types').ReviewFinding = {
+                            file: comment.path,
+                            line: comment.line,
+                            severity: 'info',
+                            title: `${comment.user.login}: Review Comment`,
+                            message: comment.body,
+                            source: 'github-review'
+                        };
+                        findings.push(inlineCommentFinding);
+                    }
+                }
+            }
+
+            // Fetch general PR reviews (body-only reviews without inline comments)
+            debugLog(`[Findings] Fetching general PR reviews for PR #${prNumber}`);
+            const reviews = await PrDiffFetcher.githubRequest<Array<{
+                id: number;
+                user: { login: string };
+                body: string;
+                state: string;
+                submitted_at: string;
+            }>>(`/repos/${owner}/${repo}/pulls/${prNumber}/reviews`, auth.token, host, 'application/vnd.github.v3+json', auth.apiBaseUrl);
+
+            for (const review of reviews) {
+                if (review.body && review.body.trim()) {
+                    // Only include reviews with general comments (not just approvals/dismissals)
+                    const reviewFinding: import('./types').ReviewFinding = {
+                        file: 'PR Review',
+                        line: -1,
+                        severity: review.state === 'APPROVED' ? 'info' : review.state === 'CHANGES_REQUESTED' ? 'error' : 'warning',
+                        title: `${review.user.login}: ${review.state === 'CHANGES_REQUESTED' ? 'Changes Requested' : review.state === 'APPROVED' ? 'Approved' : 'Review'}`,
+                        message: review.body,
+                        source: 'github-review'
+                    };
+                    findings.push(reviewFinding);
+                }
+            }
+
+            // Fetch check runs
+            debugLog(`[Findings] Fetching PR check runs for PR #${prNumber}`);
+            const checkRuns = await PrDiffFetcher.githubRequest<{
+                check_runs: Array<{
+                    id: number;
+                    name: string;
+                    conclusion: string | null;
+                    output?: { title: string; summary: string };
+                }>;
+            }>(`/repos/${owner}/${repo}/commits/${await PrDiffFetcher.getPrHeadSha(prNumber, auth, host, owner, repo)}/check-runs`, auth.token, host, 'application/vnd.github.v3+json', auth.apiBaseUrl);
+
+            for (const checkRun of checkRuns.check_runs) {
+                if (checkRun.conclusion && checkRun.conclusion !== 'success' && checkRun.conclusion !== 'skipped') {
+                    const checkFinding: import('./types').ReviewFinding = {
+                        file: 'CI/CD Checks',
+                        line: -1,
+                        severity: checkRun.conclusion === 'failure' ? 'error' : 'warning',
+                        title: `Check: ${checkRun.name}`,
+                        message: checkRun.output?.summary || `Check concluded with: ${checkRun.conclusion}`,
+                        source: 'github-check'
+                    };
+                    findings.push(checkFinding);
+                }
+            }
+
+            debugLog(`[Findings] Fetched ${findings.length} findings from PR #${prNumber}`);
+        } catch (err) {
+            debugLog(`[Findings] Failed to fetch PR findings: ${err}`);
+            // Return empty array on error - this is optional, so don't break the review
+        }
+
+        return findings;
+    }
+
+    /**
+     * Gets the HEAD SHA of a PR for fetching check runs.
+     */
+    private static async getPrHeadSha(prNumber: number, auth: { token: string; apiBaseUrl?: string }, host: string, owner: string, repo: string): Promise<string> {
+        const pr = await PrDiffFetcher.githubRequest<{
+            head: { sha: string };
+        }>(`/repos/${owner}/${repo}/pulls/${prNumber}`, auth.token, host, 'application/vnd.github.v3+json', auth.apiBaseUrl);
+        return pr.head.sha;
+    }
 }
