@@ -11,4 +11,6 @@ export interface ReviewFinding {
     message: string;
     /** Suggested fix, if any. */
     suggestion?: string;
+    /** Source of the finding (e.g. 'copilot', 'github-check', 'github-review') */
+    source?: string;
 }

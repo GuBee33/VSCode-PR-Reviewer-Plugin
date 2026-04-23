@@ -719,6 +719,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   .badge.error   { background: rgba(255,85,85,0.2);  color: #ff5555; }
   .badge.warning { background: rgba(255,204,0,0.2);  color: #ccaa00; }
   .badge.info    { background: rgba(51,153,255,0.2); color: #3399ff; }
+  .source-badge { display: inline-block; font-size: 0.6em; padding: 2px 6px; border-radius: 3px; margin-left: 6px; background: var(--vscode-tab-inactiveBackground); color: var(--vscode-descriptionForeground); }
   .empty-state { text-align: center; padding: 20px 10px; color: var(--vscode-descriptionForeground); font-style: italic; font-size: 0.85em; }
   .review-btn {
     display: inline-block; margin-top: 10px; padding: 6px 14px;
@@ -768,6 +769,35 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     font-size: 0.85em; font-family: inherit; resize: vertical;
   }
   .extra-instructions:focus { outline: 1px solid var(--vscode-focusBorder); }
+  .filters-section {
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, #555);
+    border-radius: 4px;
+    padding: 8px;
+    margin-bottom: 12px;
+    font-size: 0.8em;
+  }
+  .filters-section label { display: block; font-size: 0.7em; color: var(--vscode-descriptionForeground); margin-bottom: 4px; text-transform: uppercase; font-weight: bold; }
+  .filter-group { margin-bottom: 8px; }
+  .filter-group:last-child { margin-bottom: 0; }
+  .filter-multiselect {
+    width: 100%;
+    min-height: 56px;
+    padding: 4px;
+    background: var(--vscode-dropdown-background);
+    color: var(--vscode-dropdown-foreground);
+    border: 1px solid var(--vscode-dropdown-border, #555);
+    border-radius: 4px;
+    font-size: 0.8em;
+  }
+  .filter-multiselect:focus { outline: 1px solid var(--vscode-focusBorder); }
+  .filter-hint {
+    margin-top: 4px;
+    font-size: 0.72em;
+    color: var(--vscode-descriptionForeground);
+  }
+  .filter-reset { display: inline-block; padding: 2px 6px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 3px; cursor: pointer; font-size: 0.75em; margin-top: 6px; }
+  .filter-reset:hover { background: var(--vscode-button-secondaryHoverBackground); }
 </style>
 </head>
 <body>
@@ -1129,6 +1159,187 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     vscode.postMessage({ type: 'loadSettings' });
   }
 
+  let allFindings = [];
+  let currentFindings = [];
+
+  function getSourceLabel(source) {
+    switch (source) {
+      case 'github-review': return '👤 Review';
+      case 'github-check': return '✓ Check';
+      case 'copilot':
+      default: return '🤖 Copilot';
+    }
+  }
+
+  function getReviewerFromFinding(f) {
+    if (!f || !f.title) return '';
+    const match = String(f.title).match(/^([^:]+):/);
+    return match ? match[1].trim() : 'Unknown';
+  }
+
+  function isInlineFinding(f) {
+    return typeof f.line === 'number' && f.line > 0;
+  }
+
+  function buildFilterHtml(reviewers) {
+    let html = '<div class="filters-section">' +
+      '<div class="filter-group">' +
+        '<label>Severity</label>' +
+        '<select id="filter-severity" class="filter-multiselect" multiple size="3">' +
+          '<option value="error" selected>Error</option>' +
+          '<option value="warning" selected>Warning</option>' +
+          '<option value="info" selected>Info</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="filter-group">' +
+        '<label>Comment Or Review</label>' +
+        '<select id="filter-type" class="filter-multiselect" multiple size="2">' +
+          '<option value="comment" selected>Comment</option>' +
+          '<option value="review" selected>Review</option>' +
+        '</select>' +
+      '</div>';
+
+    if (reviewers.length > 0) {
+      html += '<div class="filter-group">' +
+        '<label>Reviewer</label>' +
+        '<select id="filter-reviewer" class="filter-multiselect" multiple size="' + Math.min(6, Math.max(3, reviewers.length)) + '">';
+      for (let i = 0; i < reviewers.length; i++) {
+        const reviewer = reviewers[i];
+        html += '<option value="' + escHtml(reviewer) + '" selected>' + escHtml(reviewer) + '</option>';
+      }
+      html += '</select>' +
+        '<div class="filter-hint">Use Cmd/Ctrl-click to select multiple reviewers.</div>' +
+        '</div>';
+    }
+
+    html += '<button class="filter-reset" id="filter-reset-btn" type="button">Reset Filters</button>' +
+      '</div>';
+
+    return html;
+  }
+
+  function renderFindingsList(findings) {
+    let html = '';
+    for (let i = 0; i < findings.length; i++) {
+      const f = findings[i];
+      const icon = f.severity === 'error' ? '🔴' : f.severity === 'warning' ? '🟡' : '🔵';
+      const loc = f.line > 0 ? f.file + ':' + f.line : f.file;
+      const sourceLabel = getSourceLabel(f.source);
+      html +=
+        '<div class="finding ' + escHtml(f.severity) + '" data-file="' + escHtml(f.file) + '" data-line="' + f.line + '" data-finding-index="' + i + '">' +
+          '<div class="finding-header">' + icon + ' <span class="badge ' + escHtml(f.severity) + '">' + escHtml(f.severity) + '</span> ' + escHtml(f.title) + ' <span class="source-badge">' + sourceLabel + '</span></div>' +
+          '<div class="finding-location">' + escHtml(loc) + '</div>' +
+          '<div class="finding-message">' + escHtml(f.message) + '</div>' +
+          (f.suggestion ? '<div class="finding-suggestion">💡 ' + escHtml(f.suggestion) + '</div>' : '') +
+          '<button class="fix-btn">✨ Fix with Copilot</button>' +
+        '</div>';
+    }
+    return html;
+  }
+
+  function bindFindingActions() {
+    container.querySelectorAll('.finding').forEach(function(el) {
+      el.addEventListener('click', function(e) {
+        if (e.target.classList && e.target.classList.contains('fix-btn')) return;
+        vscode.postMessage({ type: 'navigate', file: el.dataset.file, line: parseInt(el.dataset.line || '-1', 10) });
+      });
+    });
+
+    container.querySelectorAll('.fix-btn').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        const findingEl = btn.closest('.finding');
+        if (!findingEl) return;
+        const index = parseInt(findingEl.dataset.findingIndex || '-1', 10);
+        const finding = currentFindings[index];
+        if (finding) {
+          vscode.postMessage({ type: 'fixWithCopilot', finding: finding });
+        }
+      });
+    });
+  }
+
+  function applyFilters() {
+    const severitySelect = document.getElementById('filter-severity');
+    const typeSelect = document.getElementById('filter-type');
+    const reviewerSelect = document.getElementById('filter-reviewer');
+
+    const allowedSeverity = new Set(
+      severitySelect
+        ? Array.from(severitySelect.selectedOptions).map(function(opt) { return opt.value; })
+        : ['error', 'warning', 'info']
+    );
+
+    const selectedTypes = new Set(
+      typeSelect
+        ? Array.from(typeSelect.selectedOptions).map(function(opt) { return opt.value; })
+        : ['comment', 'review']
+    );
+
+    const allowedReviewers = reviewerSelect
+      ? new Set(Array.from(reviewerSelect.selectedOptions).map(function(opt) { return opt.value; }))
+      : null;
+
+    currentFindings = allFindings.filter(function(f) {
+      if (!allowedSeverity.has(f.severity)) return false;
+
+      const inline = isInlineFinding(f);
+      if (inline && !selectedTypes.has('comment')) return false;
+      if (!inline && !selectedTypes.has('review')) return false;
+
+      if (allowedReviewers) {
+        const reviewer = getReviewerFromFinding(f);
+        if (!allowedReviewers.has(reviewer)) return false;
+      }
+
+      return true;
+    });
+
+    const summaryLine = 'Found ' + currentFindings.length + ' issue' + (currentFindings.length !== 1 ? 's' : '') + ' after filtering.';
+    let findingsHtml = '<div class="findings-header-row">' +
+      '<div class="findings-header">' + escHtml(summaryLine) + '</div>' +
+      '<button class="fix-all-btn" id="fix-all-btn">✨ Fix All with Copilot</button>' +
+      '</div>';
+
+    if (currentFindings.length === 0) {
+      findingsHtml += '<div class="empty-state">No findings match your filters.</div>';
+    } else {
+      findingsHtml += renderFindingsList(currentFindings);
+    }
+
+    const filterSection = container.querySelector('.filters-section');
+    container.innerHTML = (filterSection ? filterSection.outerHTML : '') + findingsHtml;
+
+    bindFilterActions();
+    bindFindingActions();
+
+    const fixAllBtn = document.getElementById('fix-all-btn');
+    if (fixAllBtn) {
+      fixAllBtn.addEventListener('click', function() {
+        vscode.postMessage({ type: 'fixAllWithCopilot', findings: currentFindings });
+      });
+    }
+  }
+
+  function bindFilterActions() {
+    const selects = container.querySelectorAll('.filters-section select');
+    selects.forEach(function(selectEl) {
+      selectEl.addEventListener('change', applyFilters);
+    });
+
+    const resetBtn = document.getElementById('filter-reset-btn');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', function() {
+        container.querySelectorAll('.filters-section select').forEach(function(selectEl) {
+          for (let i = 0; i < selectEl.options.length; i++) {
+            selectEl.options[i].selected = true;
+          }
+        });
+        applyFilters();
+      });
+    }
+  }
+
   function renderFindings(findings) {
     if (!findings || findings.length === 0) {
       const noIssuesMsg = currentMessages ? currentMessages.quips.noIssues : 'No findings. Either your code is decent, or I\\'ve gone blind.';
@@ -1138,67 +1349,43 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    // Store findings for fix-all functionality
-    window.currentFindings = findings;
+    allFindings = Array.isArray(findings) ? findings.slice() : [];
+    currentFindings = allFindings.slice();
 
-    const errors   = findings.filter(function(f) { return f.severity === 'error'; }).length;
-    const warnings = findings.filter(function(f) { return f.severity === 'warning'; }).length;
-    const infos    = findings.filter(function(f) { return f.severity === 'info'; }).length;
+    const errors = allFindings.filter(function(f) { return f.severity === 'error'; }).length;
+    const warnings = allFindings.filter(function(f) { return f.severity === 'warning'; }).length;
+    const infos = allFindings.filter(function(f) { return f.severity === 'info'; }).length;
 
-    const summaryLine = 'Found ' + findings.length + ' issue' + (findings.length !== 1 ? 's' : '') + ': ' +
+    const summaryLine = 'Found ' + allFindings.length + ' issue' + (allFindings.length !== 1 ? 's' : '') + ': ' +
       errors + ' error' + (errors !== 1 ? 's' : '') + ', ' +
       warnings + ' warning' + (warnings !== 1 ? 's' : '') + ', ' +
       infos + ' note' + (infos !== 1 ? 's' : '') + '.';
 
-    const quip = pickQuip(errors, warnings, findings.length);
+    const quip = pickQuip(errors, warnings, allFindings.length);
     showBubble(quip, errors > 0 ? 'laughing' : 'talking');
     setStatus(errors > 0 ? '🔴' : warnings > 0 ? '🟡' : '🔵', summaryLine);
 
-    let html = '<div class="findings-header-row">' +
+    const reviewerSet = new Set();
+    for (let i = 0; i < allFindings.length; i++) {
+      reviewerSet.add(getReviewerFromFinding(allFindings[i]));
+    }
+    const reviewers = Array.from(reviewerSet).filter(Boolean).sort();
+
+    let html = buildFilterHtml(reviewers);
+    html += '<div class="findings-header-row">' +
       '<div class="findings-header">' + escHtml(summaryLine) + '</div>' +
       '<button class="fix-all-btn" id="fix-all-btn">✨ Fix All with Copilot</button>' +
-    '</div>';
-    for (let i = 0; i < findings.length; i++) {
-      const f = findings[i];
-      const icon = f.severity === 'error' ? '🔴' : f.severity === 'warning' ? '🟡' : '🔵';
-      const loc = f.line > 0 ? f.file + ':' + f.line : f.file;
-      html +=
-        '<div class="finding ' + escHtml(f.severity) + '" data-file="' + escHtml(f.file) + '" data-line="' + f.line + '" data-finding-index="' + i + '">' +
-          '<div class="finding-header">' + icon + ' <span class="badge ' + escHtml(f.severity) + '">' + escHtml(f.severity) + '</span> ' + escHtml(f.title) + '</div>' +
-          '<div class="finding-location">' + escHtml(loc) + '</div>' +
-          '<div class="finding-message">' + escHtml(f.message) + '</div>' +
-          (f.suggestion ? '<div class="finding-suggestion">💡 ' + escHtml(f.suggestion) + '</div>' : '') +
-          '<button class="fix-btn">✨ Fix with Copilot</button>' +
-        '</div>';
-    }
+      '</div>' +
+      renderFindingsList(currentFindings);
+
     container.innerHTML = html;
+    bindFilterActions();
+    bindFindingActions();
 
-    // Navigate to file on finding click (but not on button click)
-    container.querySelectorAll('.finding').forEach(function(el) {
-      el.addEventListener('click', function(e) {
-        if (e.target.classList.contains('fix-btn')) return;
-        vscode.postMessage({ type: 'navigate', file: el.dataset.file, line: parseInt(el.dataset.line, 10) });
-      });
-    });
-
-    // Fix individual finding - look up by index instead of parsing JSON from data attribute
-    container.querySelectorAll('.fix-btn').forEach(function(btn) {
-      btn.addEventListener('click', function(e) {
-        e.stopPropagation();
-        const findingEl = btn.closest('.finding');
-        const index = parseInt(findingEl.dataset.findingIndex, 10);
-        const finding = window.currentFindings[index];
-        if (finding) {
-          vscode.postMessage({ type: 'fixWithCopilot', finding: finding });
-        }
-      });
-    });
-
-    // Fix all findings
     const fixAllBtn = document.getElementById('fix-all-btn');
     if (fixAllBtn) {
       fixAllBtn.addEventListener('click', function() {
-        vscode.postMessage({ type: 'fixAllWithCopilot', findings: window.currentFindings });
+        vscode.postMessage({ type: 'fixAllWithCopilot', findings: currentFindings });
       });
     }
   }

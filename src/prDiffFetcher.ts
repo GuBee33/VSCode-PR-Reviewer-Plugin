@@ -384,4 +384,121 @@ export class PrDiffFetcher {
             req.end();
         });
     }
+
+    /**
+     * Fetches findings from a PR via reviews and check runs.
+     * Includes PR reviews and CI/CD check annotations.
+     */
+    static async getPrFindings(prNumber: number): Promise<import('./types').ReviewFinding[]> {
+        const workspaceRoot = PrDiffFetcher.findWorkspaceRoot();
+        if (!workspaceRoot) {
+            throw new Error('No workspace folder is open. Please open a Git repository.');
+        }
+
+        const { owner, repo, host } = PrDiffFetcher.getOwnerAndRepo(workspaceRoot);
+        const auth = await PrDiffFetcher.getGitHubAuth(host, false);
+
+        debugLog(`[Findings] Fetching PR #${prNumber} findings from GitHub (${host}/${owner}/${repo})`);
+
+        const findings: import('./types').ReviewFinding[] = [];
+
+        try {
+            // Fetch inline review comments (with file and line info)
+            debugLog(`[Findings] Fetching inline review comments for PR #${prNumber}`);
+            const reviewComments = await PrDiffFetcher.githubRequest<Array<{
+                id: number;
+                user: { login: string };
+                body: string;
+                path: string;
+                line: number;
+                original_line?: number;
+                in_reply_to_id?: number;
+                state?: string;
+            }>>(`/repos/${owner}/${repo}/pulls/${prNumber}/comments`, auth.token, host, 'application/vnd.github.v3+json', auth.apiBaseUrl);
+
+            for (const comment of reviewComments) {
+                if (comment.body && comment.body.trim()) {
+                    // Only include top-level comments (not replies)
+                    if (!comment.in_reply_to_id) {
+                        const inlineCommentFinding: import('./types').ReviewFinding = {
+                            file: comment.path,
+                            line: comment.line,
+                            severity: 'info',
+                            title: `${comment.user.login}: Review Comment`,
+                            message: comment.body,
+                            source: 'github-review'
+                        };
+                        findings.push(inlineCommentFinding);
+                    }
+                }
+            }
+
+            // Fetch general PR reviews (body-only reviews without inline comments)
+            debugLog(`[Findings] Fetching general PR reviews for PR #${prNumber}`);
+            const reviews = await PrDiffFetcher.githubRequest<Array<{
+                id: number;
+                user: { login: string };
+                body: string;
+                state: string;
+                submitted_at: string;
+            }>>(`/repos/${owner}/${repo}/pulls/${prNumber}/reviews`, auth.token, host, 'application/vnd.github.v3+json', auth.apiBaseUrl);
+
+            for (const review of reviews) {
+                if (review.body && review.body.trim()) {
+                    // Only include reviews with general comments (not just approvals/dismissals)
+                    const reviewFinding: import('./types').ReviewFinding = {
+                        file: 'PR Review',
+                        line: -1,
+                        severity: review.state === 'APPROVED' ? 'info' : review.state === 'CHANGES_REQUESTED' ? 'error' : 'warning',
+                        title: `${review.user.login}: ${review.state === 'CHANGES_REQUESTED' ? 'Changes Requested' : review.state === 'APPROVED' ? 'Approved' : 'Review'}`,
+                        message: review.body,
+                        source: 'github-review'
+                    };
+                    findings.push(reviewFinding);
+                }
+            }
+
+            // Fetch check runs
+            debugLog(`[Findings] Fetching PR check runs for PR #${prNumber}`);
+            const checkRuns = await PrDiffFetcher.githubRequest<{
+                check_runs: Array<{
+                    id: number;
+                    name: string;
+                    conclusion: string | null;
+                    output?: { title: string; summary: string };
+                }>;
+            }>(`/repos/${owner}/${repo}/commits/${await PrDiffFetcher.getPrHeadSha(prNumber, auth, host, owner, repo)}/check-runs`, auth.token, host, 'application/vnd.github.v3+json', auth.apiBaseUrl);
+
+            for (const checkRun of checkRuns.check_runs) {
+                if (checkRun.conclusion && checkRun.conclusion !== 'success' && checkRun.conclusion !== 'skipped') {
+                    const checkFinding: import('./types').ReviewFinding = {
+                        file: 'CI/CD Checks',
+                        line: -1,
+                        severity: checkRun.conclusion === 'failure' ? 'error' : 'warning',
+                        title: `Check: ${checkRun.name}`,
+                        message: checkRun.output?.summary || `Check concluded with: ${checkRun.conclusion}`,
+                        source: 'github-check'
+                    };
+                    findings.push(checkFinding);
+                }
+            }
+
+            debugLog(`[Findings] Fetched ${findings.length} findings from PR #${prNumber}`);
+        } catch (err) {
+            debugLog(`[Findings] Failed to fetch PR findings: ${err}`);
+            // Return empty array on error - this is optional, so don't break the review
+        }
+
+        return findings;
+    }
+
+    /**
+     * Gets the HEAD SHA of a PR for fetching check runs.
+     */
+    private static async getPrHeadSha(prNumber: number, auth: { token: string; apiBaseUrl?: string }, host: string, owner: string, repo: string): Promise<string> {
+        const pr = await PrDiffFetcher.githubRequest<{
+            head: { sha: string };
+        }>(`/repos/${owner}/${repo}/pulls/${prNumber}`, auth.token, host, 'application/vnd.github.v3+json', auth.apiBaseUrl);
+        return pr.head.sha;
+    }
 }
